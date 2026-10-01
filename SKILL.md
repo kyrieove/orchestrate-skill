@@ -23,12 +23,13 @@ changes > 3 files, or is expected to take > 30 min. Otherwise dispatch directly.
 
 ## Who builds, who reviews
 
-Builder and reviewer are always different executors.
+Builder and reviewer are always different executors. **Default: agy builds, codex reviews** — agy is
+much faster; codex's strictness is worth more in review, and it catches agy's habit of copying code.
 
 | Task shape | Builder | Reviewer |
 |---|---|---|
-| Precise implementation, bug fix with a repro, refactor | codex | agy (runs the check, first-pass review) |
-| Bulk reading/summarising, scaffolding, test generation, docs drafts, batch data runs | agy | codex |
+| Default: features, fixes, refactors, scaffolding, tests, docs, batch data runs | agy | codex |
+| Exactness-critical (numbers must match a paper/reference bit for bit), or agy failed the same card twice | codex | agy |
 | Web-grounded search, media transcription | agy | codex (spot-checks claims) |
 | Literature metadata / DOI checks, text-only surveys | codex | agy |
 
@@ -42,8 +43,8 @@ sides, the review runs in a fresh codex session on `gpt-6-astra` and the verdict
 ```markdown
 ---
 name: fix-colorbar-ticks
-builder: codex          # codex | agy
-reviewer: agy           # the other one
+builder: agy            # agy | codex
+reviewer: codex         # the other one
 check: python -m pytest test/test_source.py -q
 tier: standard          # quick | standard | planned
 ---
@@ -87,5 +88,8 @@ read only the part it points at. Accepted → tell the user, add one entry to th
 - agy copies existing code instead of reusing it — write "reuse X" in Notes; the codex review looks for duplicates.
 - agy burns tokens waiting on slow tests — give the fastest check that proves the goal.
 - codex can't fetch images; keep its literature work text-only.
+- agy (verified 2026-10-01): with `-p` it ignores stdin — the script writes the prompt to a file and
+  points `-p` at it; without `-p` (review) it must be told "use no tools", or headless mode denies its
+  tool call and it prints nothing. Inside codex's sandbox agy can't sign in — don't nest them.
 - Data: input folders read-only, outputs to a new folder, jobs > 10 min must resume in batches (see `agy-delegate` form C).
 - Executors leave junk (e.g. `.mne-test-profile/`) — the reviewer flags untracked files.
