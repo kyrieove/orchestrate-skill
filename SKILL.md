@@ -64,8 +64,18 @@ python C:/Users/ASUS/.claude/skills/orchestrate/scripts/orchestrate.py run <card
 python C:/Users/ASUS/.claude/skills/orchestrate/scripts/orchestrate.py status <card.md>
 ```
 
-Run `run` in the background; you are notified when it exits. Don't poll. When the user asks for
-progress — or every 30 min for runs over an hour — read only the one-line `status`.
+Run `run` in the background, and in the same message arm a Monitor on the stage watcher
+(`timeout_ms` 1800000, re-arm on expiry while the run is alive):
+
+```bash
+bash C:/Users/ASUS/.claude/skills/orchestrate/scripts/watch.sh <card.md>
+```
+
+It emits one line per stage change (plan → build → check → review → fix round …), a "still running"
+line after 10 quiet minutes, and exits on a terminal stage. **On every event, tell the user in one
+line**: stage, executor, minutes — e.g. "第 2 阶段：codex 审查中（r1，已 14 分钟）". The user must never sit
+through 10+ silent minutes. Never run an executor in the foreground: a Bash call over 10 min is cut
+off and the conversation goes quiet. Don't read logs on these events — the status line is enough.
 
 The script: refuses to start if another code-changing run holds the repo lock → creates branch
 `orch/<name>` → builder → check → reviewer → feeds failures back to the builder (max 2 rounds) →
