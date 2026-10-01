@@ -1,108 +1,82 @@
 ---
 name: orchestrate
-description: Hand multi-step coding, data or research work to the codex CLI and the agy CLI, which build and cross-review each other, while Claude only writes a short task card and does the final acceptance — the workflow that spends the least Claude quota. Use whenever the user says Claude should plan/review but not implement, says 分工, 派活, 编排, orchestrate, 让 codex 和 agy 干, 交给 codex, or starts a new module, feature, bug fix, analysis or literature survey in a project whose HANDOFF.md says "Claude plans and reviews".
+description: Claude plans and accepts; agy executes a detailed task card; codex reviews once. Use whenever the user says Claude should plan/review but not implement, says 分工, 派活, 编排, orchestrate, /orch, 让 agy 干, 交给 agy/codex, or starts a feature, fix, refactor, analysis or batch job in a project whose HANDOFF.md says "Claude plans and reviews".
 ---
 
-# orchestrate — Claude writes the card and accepts; codex and agy build and review
+# orchestrate — Claude plans, agy executes, codex reviews once
 
-The scarce resource is **Claude quota**. Every Claude turn re-reads the whole context, so the cost is
-driven by how many turns a task takes and how much text comes back into Claude's context. This skill
-keeps both small: Claude appears at dispatch and at acceptance; everything between runs unattended in
-`orchestrate.py`. Claude never writes the implementation itself.
+**Why this shape.** agy following explicit steps is fast and cheap. agy *figuring things out* — reading
+large files, designing, re-running whole test suites, reworking after strict reviews — costs tens of
+times more (measured 2026-10-01: a goal-only card burned 2.2 M fresh + 18 M cached input tokens).
+So the design work stays with Claude: the card says exactly what to do, agy does it, codex checks it
+once, Claude accepts. Claude never writes the implementation itself.
 
-## Tiers (pick before writing the card)
+## Flow
 
-| Tier | When | Flow |
-|---|---|---|
-| **quick** | one file, obvious fix, < ~20 lines | builder only + check command, no review (`--quick`) |
-| **standard** | default | card → builder → check → reviewer → ≤ 2 auto-fix rounds |
-| **planned** | new module, data processing, > 3 files | card → builder writes `plan.md` → reviewer reviews plan → auto-builds (stops only if plan review says NEEDS_INPUT) |
+1. **Read just enough.** `grep -n` / `sed -n 'a,bp'` on the code the change touches. For a large
+   unfamiliar area, first send agy a read-only recon card ("summarise X: functions, call sites, data
+   flow, ≤ 40 lines") and plan from its summary.
+2. **Write the card** — `docs/orch/<yyyy-mm-dd>-<name>/card.md` in the project (sections below).
+   One task per card. Before dispatching, show the user the card when it writes to data folders or
+   does anything irreversible; otherwise dispatch.
+3. **agy executes** (background + heartbeat, commands below). Tracked files must be clean first.
+4. **codex reviews once** — ask the user which model first (default `gpt-6.1-sol`). Skip the review
+   for docs, typos or changes ≤ 10 lines; Claude reads the diff instead.
+5. **Fix if needed.** Claude reads `review.md`, appends `## Fix 1` to the card (exact steps), agy runs
+   it again; Claude checks only that fix's diff — no second codex review. Max 2 fixes, then rewrite
+   the card.
+6. **Accept.** Run the check, `git diff --stat`, look at the product (open the figure, run the CLI).
+   Append `## Acceptance` to the card, commit (code + card + review), **don't push**. If the project
+   keeps a log (e.g. `docs/review-log.md`), add one line pointing at the card.
 
-Ask the user before dispatching (show the card) only for irreversible actions or writes to data folders. Otherwise dispatch directly.
-
-## Who builds, who reviews
-
-Builder and reviewer are always different executors. **Default: agy builds, codex reviews** — agy is
-much faster; codex's strictness is worth more in review, and it catches agy's habit of copying code.
-
-| Task shape | Builder | Reviewer |
-|---|---|---|
-| Default: features, fixes, refactors, scaffolding, tests, docs, batch data runs | agy | codex |
-| Exactness-critical (numbers must match a paper/reference bit for bit), or agy failed the same card twice | codex | agy |
-| Web-grounded search, media transcription | agy | codex (spot-checks claims) |
-| Literature metadata / DOI checks, text-only surveys | codex | agy |
-
-Quota out on one side → the script swaps executors automatically (never calling an exhausted
-provider again in this run); if that leaves one executor on both sides, the review runs in a fresh
-session (on `gpt-6-astra` if codex) and the verdict is marked `same-source`.
-
-## The task card (Claude writes this — ≤ 20 lines)
-
-`.orchestrate/<yyyy-mm-dd>-<name>/card.md` in the project root (add `.orchestrate/` to `.gitignore`):
+## Card sections (`card.md`)
 
 ```markdown
----
-name: fix-colorbar-ticks
-builder: agy            # agy | codex
-reviewer: codex         # the other one
-check: python -m pytest test/test_source.py -q
-tier: standard          # quick | standard | planned
----
-Goal: <one or two sentences — what is true when done>
-May change: <files or globs>
-Read-only: <data folders, anything that must not be touched>
-Notes: <constraints the executor can't guess: reuse function X, keep defaults, units…>
+# <name> — <one-line goal>
+## Goal        what is true when done, in observable terms
+## Files       may change: … / read-only: … (data folders always read-only)
+## Steps       numbered; per step: file → function → the exact behaviour change; code snippets
+               for anything fiddly (index math, time axes, regexes, API calls agy may get wrong)
+## Check       one command, the fastest existing test that proves the goal; add ONE small new test
+               only for a bug with a crisp repro, and spell it out here
+## Don't       no commits, no other files, no refactors beyond the steps, reuse helper X instead of copying
 ```
 
-Write the goal as an outcome the check command can prove. Don't restate project rules the executors
-can read themselves (`AGENTS.md`, `CLAUDE.md`, HANDOFF.md) — point at them.
+Later sections appended in the same file: `## Fix 1`, `## Fix 2`, `## Acceptance` (verdict, files,
+check result, commit hash). Each task folder holds only `card.md` and `review.md`.
 
-## Run
+## Commands
+
+agy (model fixed; `-p` ignores stdin, so it reads the card from disk):
 
 ```bash
-python C:/Users/ASUS/.claude/skills/orchestrate/scripts/orchestrate.py run <card.md>
-python C:/Users/ASUS/.claude/skills/orchestrate/scripts/orchestrate.py status <card.md>
+T=$(mktemp -d); C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p "Read <abs card.md> and carry out every step exactly; run only the Check command; do not commit. Reply with: files changed, check result, anything you could not do." --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format json > $T/agy.json 2>&1; echo done > $T/done; echo $T
 ```
 
-Run `run` in the background, and in the same message arm a Monitor on the stage watcher
-(`timeout_ms` 1800000, re-arm on expiry while the run is alive):
+Run it with `run_in_background`, cwd = repo. In the same message arm a Monitor heartbeat
+(`timeout_ms` 1800000, re-arm while running):
 
 ```bash
-bash C:/Users/ASUS/.claude/skills/orchestrate/scripts/watch.sh <card.md>
+s=$(date +%s); until [ -f <T>/done ]; do sleep 300; [ -f <T>/done ] || echo "agy 仍在执行 <name>，已 $(( ($(date +%s)-s)/60 )) 分钟"; done
 ```
 
-It emits one line per stage change (plan → build → check → review → fix round …), a "still running"
-line after 10 quiet minutes, and exits on a terminal stage. **On every event, tell the user in one
-line**: stage, executor, minutes — e.g. "第 2 阶段：codex 审查中（r1，已 14 分钟）". The user must never sit
-through 10+ silent minutes. Never run an executor in the foreground: a Bash call over 10 min is cut
-off and the conversation goes quiet. Don't read logs on these events — the status line is enough.
+(Create `T` yourself first with `mktemp -d` so both commands know it.) Tell the user one line on
+every event: dispatch, each heartbeat, done, review done, fix dispatched, accepted. Never run an
+executor in the foreground — a Bash call over 10 min is cut off and the conversation goes silent.
 
-The script: refuses to start if another code-changing run holds the repo lock → creates branch
-`orch/<name>` → builder → check → reviewer → feeds failures back to the builder (max 2 rounds) →
-writes `summary.md` (≤ 10 lines). Fix rounds and re-reviews continue the same executor session
-(`<run>/sessions.json`), so executors don't re-read the repo from scratch. Shared project context goes
-in `<repo>/AGENTS.md` (codex reads it on its own; the script hands it to agy) — keep one per project:
-file map, conventions, key functions, how to run the tests. Summary says `OPEN: no AGENTS.md` if missing. Executors never commit. Exit 0 = passed, 1 = failed after retries,
-2 = needs Claude (plan review says NEEDS_INPUT, both quotas out, timeout).
+codex review (read-only; ask the model first):
 
-## Acceptance (Claude)
+```bash
+codex exec -s read-only -m <model> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates). Do not modify or create files. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 10 findings, each with file:line, the problem and the fix — wrong behaviour, steps not followed, files outside the card, copied code, junk files."
+```
 
-Read, in this order, and stop as soon as something is wrong:
-1. `summary.md` (≤ 10 lines: status, files changed, check result, open questions).
-2. `git diff --stat main...orch/<name>` — files outside "May change" → reject.
-3. The product itself: open the figure, run the CLI once, read the one output number that matters.
-
-Don't read the full diff, logs or transcripts unless one of those three points at a problem; then
-read only the part it points at. Accepted → tell the user, add one entry to the project log
-(`docs/review-log.md` or equivalent) and HANDOFF.md; commit only when the user says so.
+agy out of quota (429 / RESOURCE_EXHAUSTED / quota text) → ask the user for a codex model and run the
+same card with `codex exec --approve-for-me -m <model> -C <repo> "<same instruction>"` (no `-s` with
+`--approve-for-me`). Claude still doesn't implement.
 
 ## Pitfalls
 
-- agy copies existing code instead of reusing it — write "reuse X" in Notes; the codex review looks for duplicates.
-- agy burns tokens waiting on slow tests — give the fastest check that proves the goal.
-- codex can't fetch images; keep its literature work text-only.
-- agy (verified 2026-10-01): with `-p` it ignores stdin — the script writes the prompt to a file and
-  points `-p` at it; without `-p` (review) it must be told "use no tools", or headless mode denies its
-  tool call and it prints nothing (this no-tools restriction applies to agy only; codex review runs read-only and may inspect files). Inside codex's sandbox agy can't sign in — don't nest them.
-- Data: input folders read-only, outputs to a new folder, jobs > 10 min must resume in batches (see `agy-delegate` form C).
-- Executors leave junk (e.g. `.mne-test-profile/`) — the reviewer flags untracked files.
+- agy copies code instead of reusing it — name the helper to reuse in `## Don't`.
+- codex's sandbox can't write `~/.mne`: for MNE code put `_MNE_FAKE_HOME_DIR=<temp dir>` in the check.
+- Don't run agy inside codex (no sign-in there) or vice versa.
+- Executors leave junk files — `git status` at acceptance; delete them before committing.
