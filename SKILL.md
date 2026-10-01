@@ -69,7 +69,10 @@ progress — or every 30 min for runs over an hour — read only the one-line `s
 
 The script: refuses to start if another code-changing run holds the repo lock → creates branch
 `orch/<name>` → builder → check → reviewer → feeds failures back to the builder (max 2 rounds) →
-writes `summary.md` (≤ 10 lines). Executors never commit. Exit 0 = passed, 1 = failed after retries,
+writes `summary.md` (≤ 10 lines). Fix rounds and re-reviews continue the same executor session
+(`<run>/sessions.json`), so executors don't re-read the repo from scratch. Shared project context goes
+in `<repo>/AGENTS.md` (codex reads it on its own; the script hands it to agy) — keep one per project:
+file map, conventions, key functions, how to run the tests. Summary says `OPEN: no AGENTS.md` if missing. Executors never commit. Exit 0 = passed, 1 = failed after retries,
 2 = needs Claude (plan ready for review, both quotas out, timeout).
 
 ## Acceptance (Claude)

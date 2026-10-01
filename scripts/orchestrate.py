@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run a task card through its configured builder, check, and reviewer."""
 
+import json
 import os
 import re
 import shutil
@@ -14,7 +15,7 @@ QUOTA = re.compile(r"429|RESOURCE_EXHAUSTED|quota|rate.?limit|usage limit|401", 
 
 
 def git(repo, *args, check=True):
-    result = subprocess.run(["git", *args], cwd=repo, text=True, capture_output=True)
+    result = subprocess.run(["git", *args], cwd=repo, encoding="utf-8", errors="replace", capture_output=True)
     if check and result.returncode:
         raise RuntimeError(result.stderr.strip() or "git command failed")
     return result
@@ -85,6 +86,50 @@ def status_write(card, started, stage, round_no, executor):
     (card["run"] / "status").write_text(f"{card['name']} · {stage} r{round_no} · {executor} · {mins} min\n", encoding="utf-8")
 
 
+def load_sessions(run):
+    path = run / "sessions.json"
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def get_session(run, role, executor):
+    return load_sessions(run).get(f"{role}:{executor}")
+
+
+def save_session(run, role, executor, session_id):
+    if not session_id:
+        return
+    sessions = load_sessions(run)
+    sessions[f"{role}:{executor}"] = session_id
+    (run / "sessions.json").write_text(json.dumps(sessions, indent=2) + "\n", encoding="utf-8")
+
+
+def clear_session(run, role, executor):
+    sessions = load_sessions(run)
+    if sessions.pop(f"{role}:{executor}", None) is not None:
+        (run / "sessions.json").write_text(json.dumps(sessions, indent=2) + "\n", encoding="utf-8")
+
+
+def get_open_items(run, repo):
+    items = "none"
+    report_file = run / "report.md"
+    if report_file.exists():
+        for line in report_file.read_text(encoding="utf-8").splitlines():
+            if line.startswith("OPEN:"):
+                items = line.partition(":")[2].strip()
+    if not (repo / "AGENTS.md").exists():
+        if not items or items == "none":
+            return "no AGENTS.md"
+        if "no AGENTS.md" not in items:
+            return f"no AGENTS.md; {items}"
+        return items
+    return items or "none"
+
+
 def executor_path(kind):
     override = os.environ.get("ORCH_CODEX" if kind == "codex" else "ORCH_AGY")
     if override:
@@ -94,7 +139,7 @@ def executor_path(kind):
     return shutil.which("codex") or "codex"
 
 
-def call(kind, stage, prompt, repo, run, output_file=None, model=None, timeout=60):
+def call(kind, stage, prompt, repo, run, output_file=None, model=None, timeout=60, session_id=None, role=None):
     exe = executor_path(kind)
     command = [sys.executable, exe] if exe.lower().endswith(".py") else [exe]
     env = os.environ.copy()
@@ -102,31 +147,108 @@ def call(kind, stage, prompt, repo, run, output_file=None, model=None, timeout=6
     env["ORCH_REPO"] = str(repo)
     env["ORCH_RUN"] = str(run)
     if kind == "codex":
-        argv = command + ["exec"]
-        if stage == "build":
-            argv += ["--approve-for-me", "-m", model or "gpt-6-luna", "-c", "model_reasoning_effort=high"]
+        if session_id:
+            argv = command + ["exec", "resume", session_id, "-c", "model_reasoning_effort=high", "-m", model or "gpt-6-luna"]
+            if output_file:
+                argv += ["-o", str(output_file)]
+            argv += ["-"]
         else:
-            argv += ["-s", "read-only", "-m", model or "gpt-6-luna"]
-        argv += ["-C", str(repo)]
-        if output_file:
-            argv += ["-o", str(output_file)]
-        argv += ["-"]
+            argv = command + ["exec", "--json"]
+            if stage == "build":
+                argv += ["--approve-for-me", "-m", model or "gpt-6-luna", "-c", "model_reasoning_effort=high"]
+            else:
+                argv += ["-s", "read-only", "-m", model or "gpt-6-luna"]
+            argv += ["-C", str(repo)]
+            if output_file:
+                argv += ["-o", str(output_file)]
+            argv += ["-"]
         if os.name == "nt" and exe.lower().endswith((".cmd", ".bat")):
             argv = [os.environ.get("COMSPEC", "cmd.exe"), "/c", *argv]
     elif stage == "build":
         prompt_file = run / "prompt_build.md"
+        agents_file = repo / "AGENTS.md"
+        if agents_file.exists():
+            prefix = f"First read {agents_file.resolve()}\n\n"
+            if not prompt.startswith("First read "):
+                prompt = prefix + prompt
         prompt_file.write_text(prompt, encoding="utf-8")
-        argv = command + ["-p", f"Read {prompt_file.resolve()} and follow it exactly.", "--model", "gemini-3.8-flash-high", "--dangerously-skip-permissions", "--output-format", "text"]
+        argv = command
+        if session_id:
+            argv = argv + ["--conversation", session_id]
+        argv = argv + ["-p", f"Read {prompt_file.resolve()} and follow it exactly.", "--model", "gemini-3.8-flash-high", "--dangerously-skip-permissions", "--output-format", "json"]
     else:
-        argv = command + ["--model", "gemini-3.8-flash-high", "--output-format", "text"]
+        argv = command
+        if session_id:
+            argv = argv + ["--conversation", session_id]
+        argv = argv + ["--model", "gemini-3.8-flash-high", "--output-format", "json"]
     try:
-        result = subprocess.run(argv, cwd=repo, input=None if kind == "agy" and stage == "build" else prompt, text=True, capture_output=True,
+        result = subprocess.run(argv, cwd=repo, input=None if kind == "agy" and stage == "build" else prompt,
+                                encoding="utf-8", errors="replace", capture_output=True,
                                 timeout=timeout, env=env, shell=False)
         with (run / (stage + ".log")).open("a", encoding="utf-8") as log:
-            log.write(result.stdout + result.stderr)
-        if output_file and not output_file.exists():
-            output_file.write_text(result.stdout, encoding="utf-8")
-        return result.returncode, result.stdout + result.stderr
+            log.write((result.stdout or "") + (result.stderr or ""))
+
+        new_session_id = session_id
+        effective_output = ""
+        if kind == "agy":
+            try:
+                data = json.loads(result.stdout)
+                if isinstance(data, dict):
+                    new_session_id = data.get("conversation_id") or new_session_id
+                    effective_output = data.get("response", "")
+            except Exception:
+                m = re.search(r'"conversation_id"\s*:\s*"([^"]+)"', result.stdout)
+                if m:
+                    new_session_id = m.group(1)
+                m_resp = re.search(r'"response"\s*:\s*"((?:[^"\\]|\\.)*)"', result.stdout)
+                if m_resp:
+                    try:
+                        effective_output = json.loads(f'"{m_resp.group(1)}"')
+                    except Exception:
+                        effective_output = m_resp.group(1)
+            if not effective_output or result.returncode != 0:
+                if not effective_output:
+                    effective_output = result.stdout
+            if output_file and result.returncode == 0:
+                output_file.write_text(effective_output, encoding="utf-8")
+        elif kind == "codex":
+            if not session_id:
+                for line in result.stdout.splitlines():
+                    try:
+                        data = json.loads(line.strip())
+                        if isinstance(data, dict) and "thread_id" in data:
+                            new_session_id = data["thread_id"]
+                            break
+                    except Exception:
+                        pass
+                if not new_session_id:
+                    m = re.search(r'"thread_id"\s*:\s*"([^"]+)"', result.stdout)
+                    if m:
+                        new_session_id = m.group(1)
+            if output_file and output_file.exists():
+                effective_output = output_file.read_text(encoding="utf-8")
+            else:
+                effective_output = result.stdout
+                if output_file and result.returncode == 0:
+                    output_file.write_text(effective_output, encoding="utf-8")
+        else:
+            effective_output = result.stdout
+            if output_file and not output_file.exists():
+                output_file.write_text(effective_output, encoding="utf-8")
+
+        if role and new_session_id and result.returncode == 0:
+            save_session(run, role, kind, new_session_id)
+
+        output_text = effective_output
+        if result.returncode != 0:
+            if result.stdout and result.stdout not in output_text:
+                output_text += "\n" + result.stdout
+            if result.stderr:
+                output_text += "\n" + result.stderr
+        elif result.stderr:
+            output_text += "\n" + result.stderr
+
+        return result.returncode, output_text
     except subprocess.TimeoutExpired as exc:
         with (run / (stage + ".log")).open("a", encoding="utf-8") as log:
             log.write("\nTIMEOUT\n")
@@ -158,6 +280,26 @@ def valid_verdict(run):
     return bool(lines and lines[0] in ("VERDICT: PASS", "VERDICT: FAIL"))
 
 
+def make_review_material(card, run, repo, diff, report, actual_reviewer):
+    material_parts = [
+        "Do NOT use any tools or run commands; everything is in this message.",
+        "Card content:",
+        card["path"].read_text(encoding="utf-8"),
+    ]
+    if actual_reviewer == "agy" and (repo / "AGENTS.md").exists():
+        agents_200 = "\n".join((repo / "AGENTS.md").read_text(encoding="utf-8").splitlines()[:200])
+        material_parts += ["AGENTS.md:", agents_200]
+    material_parts += [
+        f"Diff:\n{diff}",
+        "Check log tail:",
+        "\n".join((run / "check.log").read_text(encoding="utf-8").splitlines()[-40:]),
+        "Report:",
+        report.read_text(encoding="utf-8") if report.exists() else "missing",
+        "Write review.md. First line must be exactly VERDICT: PASS or VERDICT: FAIL, then findings."
+    ]
+    return "\n".join(material_parts)
+
+
 def swap_executor(stage, executor, other, prompt, repo, run, fallback, reason, same_source=False, timeout=60):
     fallback.append(f"{executor} {stage} {reason}; switched to {other}")
     actual = "codex" if stage == "review" and same_source else other
@@ -165,7 +307,9 @@ def swap_executor(stage, executor, other, prompt, repo, run, fallback, reason, s
     output_file = run / "codex_last.txt" if stage == "build" and actual == "codex" else None
     if stage == "review" and actual == "codex":
         output_file = run / "review.md"
-    code, output = call(actual, stage, prompt, repo, run, output_file, model=model, timeout=timeout)
+    role = "builder" if stage == "build" else "reviewer"
+    clear_session(run, role, actual)
+    code, output = call(actual, stage, prompt, repo, run, output_file, model=model, timeout=timeout, session_id=None, role=role)
     return actual, code, output, same_source
 
 
@@ -178,6 +322,11 @@ def run_card(card, quick=False):
         raise RuntimeError("task card is not inside a git repository")
     repo = Path(repo_result.stdout.strip())
     lock = take_lock(repo, card["name"])
+    builder, reviewer = card["builder"], card["reviewer"]
+    rounds = 0
+    fallback = []
+    check_result = "not run"
+    base = ""
     try:
         base = git(repo, "branch", "--show-current").stdout.strip()
         branch = "orch/" + card["name"]
@@ -186,12 +335,7 @@ def run_card(card, quick=False):
             git(repo, "checkout", branch)
         else:
             git(repo, "checkout", "-b", branch, base)
-        builder, reviewer = card["builder"], card["reviewer"]
-        fallback = []
         used = set()
-        check_result = "not run"
-        rounds = 0
-        open_items = "none"
         same_source = False
         plan = run / "plan.md"
         if card["tier"] == "planned" and not plan.exists():
@@ -224,17 +368,43 @@ def run_card(card, quick=False):
             review = run / "review.md"
             check_log = run / "check.log"
             if round_no:
-                context += ["Fix the previous findings. Previous review:",
-                            review.read_text(encoding="utf-8") if review.exists() else "No review was produced; the previous check failed.",
-                            "Previous check log:", check_log.read_text(encoding="utf-8") if check_log.exists() else "missing"]
-            prompt = "\n".join(context)
+                findings_text = review.read_text(encoding="utf-8") if review.exists() else (
+                    "No review was produced; the previous check failed.\n" +
+                    ("\n".join(check_log.read_text(encoding="utf-8").splitlines()[-40:]) if check_log.exists() else "missing")
+                )
+                full_prompt = "\n".join(context + [
+                    "Fix the previous findings. Previous review:",
+                    review.read_text(encoding="utf-8") if review.exists() else "No review was produced; the previous check failed.",
+                    "Previous check log:", check_log.read_text(encoding="utf-8") if check_log.exists() else "missing"
+                ])
+                short_prompt = f"{findings_text}\n\nFix them, rewrite report.md."
+            else:
+                full_prompt = "\n".join(context)
+                short_prompt = full_prompt
+
+            builder_session = get_session(run, "builder", builder) if round_no else None
+            prompt = short_prompt if builder_session else full_prompt
             try:
                 code, output = call(builder, "build", prompt, repo, run,
                                     run / "codex_last.txt" if builder == "codex" else None,
-                                    timeout=int(card["timeout_min"]) * 60)
+                                    timeout=int(card["timeout_min"]) * 60,
+                                    session_id=builder_session, role="builder")
             except TimeoutError:
                 status_write(card, started, "timeout", round_no, builder)
                 return 2
+
+            if builder_session and code and not QUOTA.search(output):
+                fallback.append(f"{builder} build resume failed; retried fresh")
+                clear_session(run, "builder", builder)
+                try:
+                    code, output = call(builder, "build", full_prompt, repo, run,
+                                        run / "codex_last.txt" if builder == "codex" else None,
+                                        timeout=int(card["timeout_min"]) * 60,
+                                        session_id=None, role="builder")
+                except TimeoutError:
+                    status_write(card, started, "timeout", round_no, builder)
+                    return 2
+
             used.add(builder)
             if code and QUOTA.search(output):
                 other = "agy" if builder == "codex" else "codex"
@@ -242,7 +412,7 @@ def run_card(card, quick=False):
                 builder = other
                 same_source = same_source or builder == reviewer
                 try:
-                    _, code, output, _ = swap_executor("build", old_builder, builder, prompt, repo, run,
+                    _, code, output, _ = swap_executor("build", old_builder, builder, full_prompt, repo, run,
                                                        fallback, "quota", same_source,
                                                        int(card["timeout_min"]) * 60)
                 except TimeoutError:
@@ -255,44 +425,64 @@ def run_card(card, quick=False):
                     return 2
                 raise RuntimeError("builder failed")
             status_write(card, started, "check", round_no, builder)
-            check = subprocess.run(card["check"], cwd=repo, shell=True, text=True, capture_output=True)
+            check = subprocess.run(card["check"], cwd=repo, shell=True, encoding="utf-8", errors="replace", capture_output=True)
             check_result = "passed" if check.returncode == 0 else f"failed (exit {check.returncode})"
-            (run / "check.log").write_text(check.stdout + check.stderr, encoding="utf-8")
+            (run / "check.log").write_text((check.stdout or "") + (check.stderr or ""), encoding="utf-8")
             passed = check.returncode == 0
+            if not passed:
+                try:
+                    (run / "review.md").unlink()
+                except FileNotFoundError:
+                    pass
             if passed and not (quick or card["tier"] == "quick"):
-                status_write(card, started, "review", round_no, reviewer)
+                actual_reviewer = "codex" if same_source else reviewer
+                status_write(card, started, "review", round_no, actual_reviewer)
                 diff = git(repo, "diff", base).stdout
                 (run / "diff.patch").write_text(diff, encoding="utf-8")
                 report = run / "report.md"
-                material = ("Do NOT use any tools or run commands; everything is in this message.\nCard content:\n" +
-                            card["path"].read_text(encoding="utf-8") +
-                            f"\nDiff:\n{diff}\nCheck log tail:\n" +
-                            "\n".join((run / "check.log").read_text(encoding="utf-8").splitlines()[-40:]) +
-                            "\nReport:\n" + (report.read_text(encoding="utf-8") if report.exists() else "missing") +
-                            "\nWrite review.md. First line must be exactly VERDICT: PASS or VERDICT: FAIL, then findings.")
+                material = make_review_material(card, run, repo, diff, report, actual_reviewer)
                 try:
                     (run / "review.md").unlink()
                 except FileNotFoundError:
                     pass
                 review_model = "gpt-6-astra" if same_source else "gpt-6-luna"
+                rev_session = get_session(run, "reviewer", actual_reviewer)
                 try:
-                    rc, review_out = call("codex" if same_source else reviewer, "review", material, repo, run,
+                    rc, review_out = call(actual_reviewer, "review", material, repo, run,
                                           run / "review.md",
-                                          model=review_model, timeout=int(card["timeout_min"]) * 60)
+                                          model=review_model, timeout=int(card["timeout_min"]) * 60,
+                                          session_id=rev_session, role="reviewer")
                 except TimeoutError:
-                    status_write(card, started, "timeout", round_no, reviewer)
+                    status_write(card, started, "timeout", round_no, actual_reviewer)
                     return 2
-                actual_reviewer = "codex" if same_source else reviewer
                 used.add(actual_reviewer)
+
+                if rev_session and rc and not QUOTA.search(review_out):
+                    fallback.append(f"{actual_reviewer} review resume failed; retried fresh")
+                    clear_session(run, "reviewer", actual_reviewer)
+                    try:
+                        (run / "review.md").unlink()
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        rc, review_out = call(actual_reviewer, "review", material, repo, run,
+                                              run / "review.md",
+                                              model=review_model, timeout=int(card["timeout_min"]) * 60,
+                                              session_id=None, role="reviewer")
+                    except TimeoutError:
+                        status_write(card, started, "timeout", round_no, actual_reviewer)
+                        return 2
+
                 if not rc and not valid_verdict(run):
                     try:
                         (run / "review.md").unlink()
                     except FileNotFoundError:
                         pass
                     try:
-                        rc, review_out = call(actual_reviewer if not same_source else "codex", "review", material,
+                        rc, review_out = call(actual_reviewer, "review", material,
                                               repo, run, run / "review.md", model=review_model,
-                                              timeout=int(card["timeout_min"]) * 60)
+                                              timeout=int(card["timeout_min"]) * 60,
+                                              session_id=get_session(run, "reviewer", actual_reviewer), role="reviewer")
                     except TimeoutError:
                         status_write(card, started, "timeout", round_no, actual_reviewer)
                         return 2
@@ -305,9 +495,11 @@ def run_card(card, quick=False):
                         (run / "review.md").unlink()
                     except FileNotFoundError:
                         pass
+                    swap_target = "codex" if same_source else reviewer
+                    swap_material = make_review_material(card, run, repo, diff, report, swap_target)
                     try:
                         actual_reviewer, rc, review_out, same_source = swap_executor(
-                            "review", old_reviewer, reviewer, material, repo, run, fallback,
+                            "review", old_reviewer, reviewer, swap_material, repo, run, fallback,
                             "quota" if QUOTA.search(review_out) else "invalid verdict", same_source,
                             int(card["timeout_min"]) * 60)
                     except TimeoutError:
@@ -327,22 +519,32 @@ def run_card(card, quick=False):
                     status_write(card, started, "reviewer failure", round_no, actual_reviewer)
                     return 2
                 passed = verdict[0] == "VERDICT: PASS"
-            report_file = run / "report.md"
-            if report_file.exists():
-                for line in report_file.read_text(encoding="utf-8").splitlines():
-                    if line.startswith("OPEN:"):
-                        open_items = line.partition(":")[2].strip()
             if passed:
                 stat = git(repo, "diff", "--stat", base).stdout
-                summary(run, "PASS", builder, reviewer, rounds, stat, check_result, open_items, fallback)
+                summary(run, "PASS", builder, reviewer, rounds, stat, check_result, get_open_items(run, repo), fallback)
                 status_write(card, started, "complete", round_no, builder)
                 return 0
             if round_no == 2:
                 break
         stat = git(repo, "diff", "--stat", base).stdout
-        summary(run, "FAIL", builder, reviewer, rounds, stat, check_result, open_items, fallback)
+        summary(run, "FAIL", builder, reviewer, rounds, stat, check_result, get_open_items(run, repo), fallback)
         status_write(card, started, "failed", rounds, builder)
         return 1
+    except Exception as exc:
+        status_write(card, started, "error", rounds, builder)
+        stat = ""
+        if base:
+            try:
+                stat = git(repo, "diff", "--stat", base).stdout
+            except Exception:
+                pass
+        open_items = "none"
+        try:
+            open_items = get_open_items(run, repo)
+        except Exception:
+            pass
+        summary(run, "ERROR", builder, reviewer, rounds, stat, check_result, open_items, fallback + [f"error: {exc}"])
+        return 2
     finally:
         try:
             lock.unlink()
@@ -377,7 +579,7 @@ def main(argv=None):
         if summary_file.exists():
             sys.stdout.write(summary_file.read_text(encoding="utf-8"))
         return code
-    except (OSError, ValueError, RuntimeError, TimeoutError) as exc:
+    except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
