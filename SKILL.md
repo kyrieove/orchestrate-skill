@@ -16,10 +16,9 @@ keeps both small: Claude appears at dispatch and at acceptance; everything betwe
 |---|---|---|
 | **quick** | one file, obvious fix, < ~20 lines | builder only + check command, no review (`--quick`) |
 | **standard** | default | card → builder → check → reviewer → ≤ 2 auto-fix rounds |
-| **planned** | new module, data processing, > 3 files | card → codex writes `plan.md` → **stop, Claude reads the plan** → `run` again with the plan attached |
+| **planned** | new module, data processing, > 3 files | card → builder writes `plan.md` → reviewer reviews plan → auto-builds (stops only if plan review says NEEDS_INPUT) |
 
-Ask the user before dispatching (show the card) when the task is planned-tier, touches a data folder,
-changes > 3 files, or is expected to take > 30 min. Otherwise dispatch directly.
+Ask the user before dispatching (show the card) only for irreversible actions or writes to data folders. Otherwise dispatch directly.
 
 ## Who builds, who reviews
 
@@ -33,8 +32,9 @@ much faster; codex's strictness is worth more in review, and it catches agy's ha
 | Web-grounded search, media transcription | agy | codex (spot-checks claims) |
 | Literature metadata / DOI checks, text-only surveys | codex | agy |
 
-Quota out on one side → the script swaps builders automatically; if that leaves one executor on both
-sides, the review runs in a fresh codex session on `gpt-6-astra` and the verdict is marked `same-source`.
+Quota out on one side → the script swaps executors automatically (never calling an exhausted
+provider again in this run); if that leaves one executor on both sides, the review runs in a fresh
+session (on `gpt-6-astra` if codex) and the verdict is marked `same-source`.
 
 ## The task card (Claude writes this — ≤ 20 lines)
 
@@ -73,7 +73,7 @@ writes `summary.md` (≤ 10 lines). Fix rounds and re-reviews continue the same 
 (`<run>/sessions.json`), so executors don't re-read the repo from scratch. Shared project context goes
 in `<repo>/AGENTS.md` (codex reads it on its own; the script hands it to agy) — keep one per project:
 file map, conventions, key functions, how to run the tests. Summary says `OPEN: no AGENTS.md` if missing. Executors never commit. Exit 0 = passed, 1 = failed after retries,
-2 = needs Claude (plan ready for review, both quotas out, timeout).
+2 = needs Claude (plan review says NEEDS_INPUT, both quotas out, timeout).
 
 ## Acceptance (Claude)
 
@@ -93,6 +93,6 @@ read only the part it points at. Accepted → tell the user, add one entry to th
 - codex can't fetch images; keep its literature work text-only.
 - agy (verified 2026-10-01): with `-p` it ignores stdin — the script writes the prompt to a file and
   points `-p` at it; without `-p` (review) it must be told "use no tools", or headless mode denies its
-  tool call and it prints nothing. Inside codex's sandbox agy can't sign in — don't nest them.
+  tool call and it prints nothing (this no-tools restriction applies to agy only; codex review runs read-only and may inspect files). Inside codex's sandbox agy can't sign in — don't nest them.
 - Data: input folders read-only, outputs to a new folder, jobs > 10 min must resume in batches (see `agy-delegate` form C).
 - Executors leave junk (e.g. `.mne-test-profile/`) — the reviewer flags untracked files.

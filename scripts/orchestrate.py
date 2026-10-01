@@ -13,14 +13,26 @@ import time
 from pathlib import Path
 
 
-QUOTA = re.compile(r"429|RESOURCE_EXHAUSTED|quota|rate.?limit|usage limit|401", re.I)
+QUOTA = re.compile(r"429|RESOURCE_EXHAUSTED|quota|rate.?limit|usage limit", re.I)
 
 
-def git(repo, *args, check=True):
-    result = subprocess.run(["git", *args], cwd=repo, encoding="utf-8", errors="replace", capture_output=True)
+def git(repo, *args, check=True, timeout=None):
+    try:
+        result = subprocess.run(["git", *args], cwd=repo, encoding="utf-8", errors="replace", capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"git {' '.join(args[:2])} timed out") from exc
     if check and result.returncode:
         raise RuntimeError(result.stderr.strip() or "git command failed")
     return result
+
+
+def is_quota_error(returncode, output_text):
+    if returncode == 0 or not output_text:
+        return False
+    last_lines = output_text.strip().splitlines()[-40:]
+    tail = "\n".join(last_lines)
+    return bool(QUOTA.search(tail))
+
 
 
 def parse_card(path):
@@ -58,39 +70,48 @@ def parse_card(path):
     return values
 
 
-def alive(pid):
-    try:
-        os.kill(int(pid), 0)
-        return True
-    except (ValueError, ProcessLookupError):
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return False
-
-
 def take_lock(repo, name):
-    lock = repo / ".orchestrate" / "LOCK"
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    for _ in range(2):
-        try:
-            with lock.open("x", encoding="utf-8") as f:
-                f.write(f"{os.getpid()} {name}\n")
-            return lock
-        except FileExistsError:
-            try:
-                parts = lock.read_text(encoding="utf-8").split(maxsplit=1)
-                pid = parts[0]
-            except (OSError, IndexError):
-                pid = ""
-            if alive(pid):
-                raise RuntimeError("another orchestrate run holds the repository lock")
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                pass
-    raise RuntimeError("could not acquire repository lock")
+    lock_path = repo / ".orchestrate" / "LOCK"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(lock_path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        raise RuntimeError("another orchestrate run holds the repository lock")
+    try:
+        f.seek(0)
+        f.truncate()
+        f.write(f"{os.getpid()} {name}\n".encode("utf-8"))
+        f.flush()
+    except OSError:
+        pass
+    return f
+
+
+def release_lock(lock_file):
+    if lock_file is None:
+        return
+    try:
+        if os.name == "nt":
+            import msvcrt
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        lock_file.close()
+    except OSError:
+        pass
 
 
 def status_write(card, started, stage, round_no, executor):
@@ -142,10 +163,11 @@ def get_open_items(run, repo):
     return items or "none"
 
 
-def get_status_files(repo):
-    res = git(repo, "status", "--porcelain", "-uall", "-z", check=False)
+def get_status_files(repo, timeout=None):
+    res = git(repo, "status", "--porcelain", "-uall", "-z", check=False, timeout=timeout)
     if res.returncode != 0:
-        return []
+        err = res.stderr.strip() or f"exit code {res.returncode}"
+        raise RuntimeError(f"git status failed: {err}")
     raw = res.stdout
     entries = raw.split("\0")
     items = []
@@ -173,16 +195,19 @@ def is_orchestrate_path(path):
     return p == ".orchestrate" or p.startswith(".orchestrate/")
 
 
-def sync_untracked(repo, run_dir=None):
+def sync_untracked(repo, run_dir=None, timeout=None):
     run_rel = os.path.relpath(run_dir, repo).replace("\\", "/") if run_dir else None
-    for status, path in get_status_files(repo):
+    for status, path in get_status_files(repo, timeout=timeout):
         p = path.replace("\\", "/")
         if status == "??":
             if p == ".orchestrate" or p == ".orchestrate/LOCK":
                 continue
             if run_rel and (p == run_rel or p.startswith(run_rel + "/")):
                 continue
-            git(repo, "add", "-N", "--", path, check=False)
+            res = git(repo, "add", "-N", "--", path, check=False, timeout=timeout)
+            if res.returncode != 0:
+                err = res.stderr.strip() or f"exit code {res.returncode}"
+                raise RuntimeError(f"git add -N failed for {path}: {err}")
 
 
 def file_matches_any(path_str, patterns):
@@ -203,9 +228,9 @@ def file_matches_any(path_str, patterns):
     return False
 
 
-def get_disallowed_files(repo, base, may_change_globs, run_dir):
-    sync_untracked(repo, run_dir)
-    res = git(repo, "diff", "--name-only", base, check=False)
+def get_disallowed_files(repo, base, may_change_globs, run_dir, timeout=None):
+    sync_untracked(repo, run_dir, timeout=timeout)
+    res = git(repo, "diff", "--name-only", base, check=False, timeout=timeout)
     if res.returncode != 0:
         raise RuntimeError("git diff failed: " + (res.stderr.strip() or "exit code " + str(res.returncode)))
     changed = [line.strip().replace("\\", "/") for line in res.stdout.splitlines() if line.strip()]
@@ -361,11 +386,10 @@ def call(kind, stage, prompt, repo, run, output_file=None, model=None, timeout=6
 def summary(run, result, builder, reviewer, rounds, diffstat, check_result, open_items, fallback, run_id=None, quick=False):
     diff_lines = diffstat.strip().splitlines()
     diff_summary = " | ".join(diff_lines[:3]) if diff_lines else "no changes"
-    reviewer_val = "skipped" if quick else (reviewer + (" (same-source)" if builder == reviewer else ""))
     lines = [
         "RESULT: " + result,
         "BUILDER: " + builder,
-        "REVIEWER: " + reviewer_val,
+        "REVIEWER: " + reviewer,
     ]
     if quick:
         lines.append("REVIEW: skipped")
@@ -393,11 +417,15 @@ def valid_verdict(run):
 
 
 def make_review_material(card, run, repo, diff, report, actual_reviewer):
-    material_parts = [
-        "Do NOT use any tools or run commands; everything is in this message.",
+    material_parts = []
+    if actual_reviewer == "agy":
+        material_parts.append("Do NOT use any tools or run commands; everything is in this message.")
+    else:
+        material_parts.append("You run read-only and may inspect files in the repository.")
+    material_parts.extend([
         "Card content:",
         card["path"].read_text(encoding="utf-8"),
-    ]
+    ])
     if actual_reviewer == "agy" and (repo / "AGENTS.md").exists():
         agents_200 = "\n".join((repo / "AGENTS.md").read_text(encoding="utf-8").splitlines()[:200])
         material_parts += ["AGENTS.md:", agents_200]
@@ -412,17 +440,35 @@ def make_review_material(card, run, repo, diff, report, actual_reviewer):
     return "\n".join(material_parts)
 
 
-def swap_executor(stage, executor, other, prompt, repo, run, fallback, reason, same_source=False, timeout=60, effort=None):
+def make_plan_review_material(card, plan, plan_reviewer):
+    parts = []
+    if plan_reviewer == "agy":
+        parts.append("Do NOT use any tools or run commands; everything is in this message.")
+    else:
+        parts.append("You run read-only and may inspect files in the repository.")
+    parts.extend([
+        "Review this implementation plan against the task card.",
+        "Card content:",
+        card["path"].read_text(encoding="utf-8"),
+        "Plan:",
+        plan.read_text(encoding="utf-8"),
+        "First line must be exactly VERDICT: PASS or VERDICT: NEEDS_INPUT, then findings or questions."
+    ])
+    return "\n".join(parts)
+
+
+def swap_executor(stage, executor, other, prompt, repo, run, fallback, reason, same_source=False, timeout=60, effort=None, call_fn=call):
     fallback.append(f"{executor} {stage} {reason}; switched to {other}")
-    actual = "codex" if stage == "review" and same_source else other
-    model = "gpt-6-astra" if stage == "review" and same_source else None
-    output_file = run / "codex_last.txt" if stage == "build" and actual == "codex" else None
-    if stage == "review" and actual == "codex":
-        output_file = run / "review.md"
+    actual = other
+    if actual == "codex":
+        model = "gpt-6-astra" if (stage == "review" and same_source) else "gpt-6-luna"
+    else:
+        model = "gemini-3.8-flash-high"
+    output_file = run / "codex_last.txt" if (stage == "build" and actual == "codex") else (run / "review.md" if stage == "review" else None)
     role = "builder" if stage == "build" else "reviewer"
     clear_session(run, role, actual)
-    code, output = call(actual, stage, prompt, repo, run, output_file, model=model, timeout=timeout, session_id=None, role=role, effort=effort)
-    return actual, code, output, same_source
+    code, output = call_fn(actual, stage, prompt, repo, run, output_file, model=model, timeout=timeout, session_id=None, role=role, effort=effort)
+    return actual, model, code, output, same_source
 
 
 def run_card(card, quick=False):
@@ -441,24 +487,76 @@ def run_card(card, quick=False):
     review_effort = card.get("review_effort") or "medium"
     repo = None
     lock = None
+    exhausted_providers = set()
+    actual_reviewer_used = None
+    actual_reviewer_model_used = None
+    same_source = False
+
+    timeout_seconds = float(card.get("timeout_min", "60")) * 60
+    deadline = time.monotonic() + timeout_seconds
+
+    def time_left():
+        rem = deadline - time.monotonic()
+        if rem <= 0:
+            raise TimeoutError("overall run timeout expired")
+        return rem
 
     def emit_summary(result_str, extra_fallback=None):
         stat = ""
         if repo and base:
-            try:
-                sync_untracked(repo, run)
-                stat = git(repo, "diff", "--stat", base, check=False).stdout
-            except Exception:
-                pass
+            rem = deadline - time.monotonic()
+            if rem > 0:
+                if result_str == "PASS":
+                    sync_untracked(repo, run, timeout=rem)
+                    stat = git(repo, "diff", "--stat", base, check=True, timeout=rem).stdout
+                else:
+                    try:
+                        sync_untracked(repo, run, timeout=rem)
+                        stat = git(repo, "diff", "--stat", base, check=False, timeout=rem).stdout
+                    except Exception:
+                        pass
+            elif result_str == "PASS":
+                raise TimeoutError("overall run timeout expired")
         items = get_open_items(run, repo) if repo else "none"
         fb = list(fallback)
         if extra_fallback:
             fb.append(extra_fallback)
-        return summary(run, result_str, builder, reviewer, rounds, stat, check_result, items, fb,
+        if is_quick:
+            rev_display = "skipped"
+        elif actual_reviewer_used:
+            rev_display = f"{actual_reviewer_used} ({actual_reviewer_model_used}" + (", same-source)" if same_source else ")")
+        else:
+            rev_display = f"{reviewer} (not run)"
+        return summary(run, result_str, builder, rev_display, rounds, stat, check_result, items, fb,
                        run_id=run_id, quick=is_quick)
 
+    def select_provider(preferred):
+        if preferred not in exhausted_providers:
+            return preferred
+        other = "agy" if preferred == "codex" else "codex"
+        if other not in exhausted_providers:
+            return other
+        return None
+
+    def exit_both_out_of_quota(stage, round_no=0, last_executor="codex"):
+        status_write(card, started, "quota", round_no, last_executor)
+        emit_summary("QUOTA", "both providers out of quota")
+        return 2
+
+    def run_provider(kind, stage, prompt, repo, run, output_file=None, model=None, timeout=None, session_id=None, role=None, effort=None):
+        if kind in exhausted_providers:
+            raise RuntimeError(f"attempted to call exhausted provider {kind}")
+        t = timeout if timeout is not None else time_left()
+        code, output = call(kind, stage, prompt, repo, run, output_file=output_file,
+                            model=model, timeout=t, session_id=session_id,
+                            role=role, effort=effort)
+        if is_quota_error(code, output):
+            exhausted_providers.add(kind)
+            fallback.append(f"{kind} quota exhausted")
+        return code, output
+
     try:
-        repo_result = git(run, "rev-parse", "--show-toplevel", check=False)
+        repo_result = git(run, "rev-parse", "--show-toplevel", check=False, timeout=time_left())
         if repo_result.returncode:
             raise RuntimeError("task card is not inside a git repository")
         repo = Path(repo_result.stdout.strip())
@@ -471,12 +569,12 @@ def run_card(card, quick=False):
 
         (run / "started").write_text(str(started), encoding="utf-8")
 
-        head_sha = git(repo, "rev-parse", "HEAD").stdout.strip()
+        head_sha = git(repo, "rev-parse", "HEAD", timeout=time_left()).stdout.strip()
         branch = "orch/" + card["name"]
         card_bytes = card["path"].read_bytes()
         card_hash = hashlib.sha256(card_bytes).hexdigest()
         state_file = run / "state.json"
-        existing = git(repo, "show-ref", "--verify", "--quiet", "refs/heads/" + branch, check=False)
+        existing = git(repo, "show-ref", "--verify", "--quiet", "refs/heads/" + branch, check=False, timeout=time_left())
         is_resume = False
         stored_base = None
         state = {}
@@ -497,14 +595,14 @@ def run_card(card, quick=False):
                 return 2
 
         if not is_resume:
-            dirty_files = [p for s, p in get_status_files(repo) if not is_orchestrate_path(p)]
+            dirty_files = [p for s, p in get_status_files(repo, timeout=time_left()) if not is_orchestrate_path(p)]
             if dirty_files:
                 reason = f"dirty worktree: {', '.join(dirty_files)}"
                 status_write(card, started, "error", 0, builder)
                 emit_summary("ERROR", reason)
                 return 2
             base = head_sha
-            git(repo, "checkout", "-b", branch, base)
+            git(repo, "checkout", "-b", branch, base, timeout=time_left())
             state = {
                 "card_hash": card_hash,
                 "base": base,
@@ -514,40 +612,133 @@ def run_card(card, quick=False):
             state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
         else:
             base = stored_base or head_sha
-            curr_branch = git(repo, "branch", "--show-current", check=False).stdout.strip()
+            curr_branch = git(repo, "branch", "--show-current", check=False, timeout=time_left()).stdout.strip()
             if curr_branch != branch:
-                git(repo, "checkout", branch)
+                git(repo, "checkout", branch, timeout=time_left())
             state["run_id"] = run_id
             state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
-        used = set()
-        same_source = False
         plan = run / "plan.md"
-        if card["tier"] == "planned" and not plan.exists():
-            status_write(card, started, "plan", 0, "codex")
-            prompt = f"Read the task card at {card['path']} and write a concise implementation plan to {plan}. Do not modify source files."
-            try:
-                code, output = call("codex", "plan", prompt, repo, run, plan,
-                                    timeout=int(card["timeout_min"]) * 60,
-                                    effort=review_effort)
-            except TimeoutError:
-                status_write(card, started, "timeout", 0, "codex")
-                emit_summary("TIMEOUT", "plan timed out")
-                return 2
-            if code and not plan.exists():
-                if QUOTA.search(output):
-                    status_write(card, started, "quota", 0, "codex")
-                    emit_summary("QUOTA", "plan quota exhausted")
-                    return 2
-                raise RuntimeError("codex plan failed")
+        plan_rev_file = run / "plan_review.md"
+        if card["tier"] == "planned":
             if not plan.exists():
-                plan.write_text(output, encoding="utf-8")
-            status_write(card, started, "plan ready", 0, "codex")
-            emit_summary("PLAN_READY", "plan ready")
-            return 2
+                active_builder = select_provider(builder)
+                if not active_builder:
+                    return exit_both_out_of_quota("plan", 0, builder)
+                if active_builder != builder:
+                    fallback.append(f"builder {builder} quota exhausted; using {active_builder}")
+                    builder = active_builder
+                status_write(card, started, "plan", 0, builder)
+                prompt = f"Read the task card at {card['path']} and write a concise implementation plan to {plan}. Do not modify source files."
+                try:
+                    code, output = run_provider(builder, "plan", prompt, repo, run, plan,
+                                                effort=review_effort)
+                except TimeoutError:
+                    status_write(card, started, "timeout", 0, builder)
+                    emit_summary("TIMEOUT", "plan timed out")
+                    return 2
+                if code and not plan.exists():
+                    if builder in exhausted_providers:
+                        alt = select_provider(builder)
+                        if not alt:
+                            return exit_both_out_of_quota("plan", 0, builder)
+                        builder = alt
+                        fallback.append(f"plan quota exhausted; switched builder to {builder}")
+                        try:
+                            code, output = run_provider(builder, "plan", prompt, repo, run, plan,
+                                                        effort=review_effort)
+                        except TimeoutError:
+                            status_write(card, started, "timeout", 0, builder)
+                            emit_summary("TIMEOUT", "plan timed out")
+                            return 2
+                        if code and builder in exhausted_providers:
+                            return exit_both_out_of_quota("plan", 0, builder)
+                    if code and not plan.exists():
+                        raise RuntimeError(f"{builder} plan failed")
+                if not plan.exists():
+                    plan.write_text(output, encoding="utf-8")
+
+            # Check if plan review has already passed
+            plan_reviewed = False
+            if plan_rev_file.exists():
+                vlines = plan_rev_file.read_text(encoding="utf-8").splitlines()
+                if vlines and vlines[0].strip() == "VERDICT: PASS":
+                    if plan.exists() and plan.stat().st_mtime <= plan_rev_file.stat().st_mtime:
+                        plan_reviewed = True
+
+            if not plan_reviewed:
+                # Review the plan
+                plan_reviewer = select_provider(reviewer)
+                if not plan_reviewer:
+                    return exit_both_out_of_quota("plan review", 0, reviewer)
+                if plan_reviewer != reviewer:
+                    fallback.append(f"reviewer {reviewer} quota exhausted; using {plan_reviewer}")
+                plan_rev_same_source = (plan_reviewer == builder)
+                plan_rev_model = "gpt-6-astra" if (plan_reviewer == "codex" and plan_rev_same_source) else ("gpt-6-luna" if plan_reviewer == "codex" else "gemini-3.8-flash-high")
+                status_write(card, started, "plan review", 0, plan_reviewer)
+                plan_material = make_plan_review_material(card, plan, plan_reviewer)
+                try:
+                    plan_rev_file.unlink()
+                except FileNotFoundError:
+                    pass
+                try:
+                    pr_code, pr_output = run_provider(plan_reviewer, "plan_review", plan_material, repo, run,
+                                                      plan_rev_file, model=plan_rev_model,
+                                                      role="reviewer", effort=review_effort)
+                except TimeoutError:
+                    status_write(card, started, "timeout", 0, plan_reviewer)
+                    emit_summary("TIMEOUT", "plan review timed out")
+                    return 2
+
+                if pr_code and plan_reviewer in exhausted_providers:
+                    alt = select_provider(plan_reviewer)
+                    if not alt:
+                        return exit_both_out_of_quota("plan review", 0, plan_reviewer)
+                    old_plan_reviewer = plan_reviewer
+                    plan_reviewer = alt
+                    plan_rev_same_source = (plan_reviewer == builder)
+                    plan_rev_model = "gpt-6-astra" if (plan_reviewer == "codex" and plan_rev_same_source) else ("gpt-6-luna" if plan_reviewer == "codex" else "gemini-3.8-flash-high")
+                    fallback.append(f"plan review quota; switched to {plan_reviewer}")
+                    plan_material = make_plan_review_material(card, plan, plan_reviewer)
+                    try:
+                        plan_rev_file.unlink()
+                    except FileNotFoundError:
+                        pass
+                    try:
+                        pr_code, pr_output = run_provider(plan_reviewer, "plan_review", plan_material, repo, run,
+                                                          plan_rev_file, model=plan_rev_model,
+                                                          role="reviewer", effort=review_effort)
+                    except TimeoutError:
+                        status_write(card, started, "timeout", 0, plan_reviewer)
+                        emit_summary("TIMEOUT", "plan review timed out")
+                        return 2
+                    if pr_code and plan_reviewer in exhausted_providers:
+                        return exit_both_out_of_quota("plan review", 0, plan_reviewer)
+
+                if not plan_rev_file.exists():
+                    plan_rev_file.write_text(pr_output, encoding="utf-8")
+
+                vlines = plan_rev_file.read_text(encoding="utf-8").splitlines()
+                vline = vlines[0].strip() if vlines else ""
+                if "NEEDS_INPUT" in vline:
+                    status_write(card, started, "plan needs input", 0, plan_reviewer)
+                    emit_summary("NEEDS_INPUT", "plan review requested input")
+                    return 2
+                if vline != "VERDICT: PASS":
+                    if pr_code:
+                        raise RuntimeError(f"plan reviewer {plan_reviewer} failed")
+                    status_write(card, started, "reviewer failure", 0, plan_reviewer)
+                    emit_summary("ERROR", "invalid plan review verdict")
+                    return 2
 
         for round_no in range(3):
             rounds = round_no
+            active_builder = select_provider(builder)
+            if not active_builder:
+                return exit_both_out_of_quota("build", round_no, builder)
+            if active_builder != builder:
+                fallback.append(f"builder {builder} quota exhausted; using {active_builder}")
+                builder = active_builder
             status_write(card, started, "build", round_no, builder)
             context = ["Implement this task card. Full card content follows:", card["body"],
                        "Card front matter:", card["path"].read_text(encoding="utf-8").split("---", 2)[1],
@@ -578,52 +769,58 @@ def run_card(card, quick=False):
             if (run / "report.md").exists():
                 (run / "report.md").unlink()
             try:
-                code, output = call(builder, "build", prompt, repo, run,
-                                    run / "codex_last.txt" if builder == "codex" else None,
-                                    timeout=int(card["timeout_min"]) * 60,
-                                    session_id=builder_session, role="builder")
+                code, output = run_provider(builder, "build", prompt, repo, run,
+                                            run / "codex_last.txt" if builder == "codex" else None,
+                                            session_id=builder_session, role="builder")
             except TimeoutError:
                 status_write(card, started, "timeout", round_no, builder)
                 emit_summary("TIMEOUT", "build timed out")
                 return 2
 
-            if builder_session and code and not QUOTA.search(output):
+            if builder_session and code and builder not in exhausted_providers:
                 fallback.append(f"{builder} build resume failed; retried fresh")
                 clear_session(run, "builder", builder)
                 try:
-                    code, output = call(builder, "build", full_prompt, repo, run,
-                                        run / "codex_last.txt" if builder == "codex" else None,
-                                        timeout=int(card["timeout_min"]) * 60,
-                                        session_id=None, role="builder")
+                    code, output = run_provider(builder, "build", full_prompt, repo, run,
+                                                run / "codex_last.txt" if builder == "codex" else None,
+                                                session_id=None, role="builder")
                 except TimeoutError:
                     status_write(card, started, "timeout", round_no, builder)
                     emit_summary("TIMEOUT", "build timed out")
                     return 2
 
-            used.add(builder)
-            if code and QUOTA.search(output):
-                other = "agy" if builder == "codex" else "codex"
+            if code and builder in exhausted_providers:
+                alt = select_provider(builder)
+                if not alt:
+                    return exit_both_out_of_quota("build", round_no, builder)
                 old_builder = builder
-                builder = other
-                same_source = same_source or builder == reviewer
+                builder = alt
+                same_source = (builder == reviewer)
                 try:
-                    _, code, output, _ = swap_executor("build", old_builder, builder, full_prompt, repo, run,
-                                                       fallback, "quota", same_source,
-                                                       int(card["timeout_min"]) * 60)
+                    _, _, code, output, same_source = swap_executor(
+                        "build", old_builder, builder, full_prompt, repo, run,
+                        fallback, "quota", same_source,
+                        time_left(), call_fn=run_provider)
                 except TimeoutError:
                     status_write(card, started, "timeout", round_no, builder)
                     emit_summary("TIMEOUT", "build timed out")
                     return 2
-                used.add(builder)
+                if code and builder in exhausted_providers:
+                    return exit_both_out_of_quota("build", round_no, builder)
+
             if code:
-                if QUOTA.search(output):
-                    status_write(card, started, "quota", round_no, builder)
-                    emit_summary("QUOTA", "builder quota exhausted")
-                    return 2
                 raise RuntimeError("builder failed")
 
             status_write(card, started, "check", round_no, builder)
-            check = subprocess.run(card["check"], cwd=repo, shell=True, encoding="utf-8", errors="replace", capture_output=True)
+            try:
+                check = subprocess.run(card["check"], cwd=repo, shell=True, encoding="utf-8", errors="replace", capture_output=True, timeout=time_left())
+            except subprocess.TimeoutExpired as exc:
+                with (run / "check.log").open("a", encoding="utf-8") as log:
+                    log.write("\nTIMEOUT\n")
+                status_write(card, started, "timeout", round_no, builder)
+                emit_summary("TIMEOUT", "check timed out")
+                return 2
+
             check_result = "passed" if check.returncode == 0 else f"failed (exit {check.returncode})"
             (run / "check.log").write_text((check.stdout or "") + (check.stderr or ""), encoding="utf-8")
             passed = check.returncode == 0
@@ -644,17 +841,31 @@ def run_card(card, quick=False):
                     fallback.append(f"report.md status is {report_status or 'missing'} (expected 'done')")
 
             if passed:
-                disallowed = get_disallowed_files(repo, base, card.get("may_change", []), run)
+                disallowed = get_disallowed_files(repo, base, card.get("may_change", []), run, timeout=time_left())
                 if disallowed:
                     passed = False
                     msg = f"disallowed files changed: {', '.join(disallowed)}"
                     fallback.append(msg)
 
             if passed and not is_quick:
-                actual_reviewer = "codex" if same_source else reviewer
+                actual_reviewer = select_provider(reviewer)
+                if not actual_reviewer:
+                    return exit_both_out_of_quota("review", round_no, reviewer)
+                if actual_reviewer != reviewer:
+                    fallback.append(f"reviewer {reviewer} quota exhausted; using {actual_reviewer} (same-source)")
+                    same_source = True
+                else:
+                    if same_source and "codex" not in exhausted_providers:
+                        actual_reviewer = "codex"
+                    same_source = (actual_reviewer == builder)
+
+                review_model = "gpt-6-astra" if (actual_reviewer == "codex" and same_source) else ("gpt-6-luna" if actual_reviewer == "codex" else "gemini-3.8-flash-high")
+                actual_reviewer_used = actual_reviewer
+                actual_reviewer_model_used = review_model
+
                 status_write(card, started, "review", round_no, actual_reviewer)
-                sync_untracked(repo, run)
-                diff = git(repo, "diff", base).stdout
+                sync_untracked(repo, run, timeout=time_left())
+                diff = git(repo, "diff", base, timeout=time_left()).stdout
                 (run / "diff.patch").write_text(diff, encoding="utf-8")
                 report = run / "report.md"
                 material = make_review_material(card, run, repo, diff, report, actual_reviewer)
@@ -662,21 +873,20 @@ def run_card(card, quick=False):
                     (run / "review.md").unlink()
                 except FileNotFoundError:
                     pass
-                review_model = "gpt-6-astra" if same_source else "gpt-6-luna"
+
                 rev_session = get_session(run, "reviewer", actual_reviewer)
                 try:
-                    rc, review_out = call(actual_reviewer, "review", material, repo, run,
-                                          run / "review.md",
-                                          model=review_model, timeout=int(card["timeout_min"]) * 60,
-                                          session_id=rev_session, role="reviewer",
-                                          effort=review_effort)
+                    rc, review_out = run_provider(actual_reviewer, "review", material, repo, run,
+                                                  run / "review.md",
+                                                  model=review_model,
+                                                  session_id=rev_session, role="reviewer",
+                                                  effort=review_effort)
                 except TimeoutError:
                     status_write(card, started, "timeout", round_no, actual_reviewer)
                     emit_summary("TIMEOUT", "review timed out")
                     return 2
-                used.add(actual_reviewer)
 
-                if rev_session and rc and not QUOTA.search(review_out):
+                if rev_session and rc and actual_reviewer not in exhausted_providers:
                     fallback.append(f"{actual_reviewer} review resume failed; retried fresh")
                     clear_session(run, "reviewer", actual_reviewer)
                     try:
@@ -684,11 +894,11 @@ def run_card(card, quick=False):
                     except FileNotFoundError:
                         pass
                     try:
-                        rc, review_out = call(actual_reviewer, "review", material, repo, run,
-                                              run / "review.md",
-                                              model=review_model, timeout=int(card["timeout_min"]) * 60,
-                                              session_id=None, role="reviewer",
-                                              effort=review_effort)
+                        rc, review_out = run_provider(actual_reviewer, "review", material, repo, run,
+                                                      run / "review.md",
+                                                      model=review_model,
+                                                      session_id=None, role="reviewer",
+                                                      effort=review_effort)
                     except TimeoutError:
                         status_write(card, started, "timeout", round_no, actual_reviewer)
                         emit_summary("TIMEOUT", "review timed out")
@@ -700,42 +910,53 @@ def run_card(card, quick=False):
                     except FileNotFoundError:
                         pass
                     try:
-                        rc, review_out = call(actual_reviewer, "review", material,
-                                              repo, run, run / "review.md", model=review_model,
-                                              timeout=int(card["timeout_min"]) * 60,
-                                              session_id=get_session(run, "reviewer", actual_reviewer), role="reviewer",
-                                              effort=review_effort)
+                        rc, review_out = run_provider(actual_reviewer, "review", material,
+                                                      repo, run, run / "review.md", model=review_model,
+                                                      session_id=get_session(run, "reviewer", actual_reviewer), role="reviewer",
+                                                      effort=review_effort)
                     except TimeoutError:
                         status_write(card, started, "timeout", round_no, actual_reviewer)
                         emit_summary("TIMEOUT", "review timed out")
                         return 2
-                if (rc and QUOTA.search(review_out)) or (not rc and not valid_verdict(run)):
-                    other = "agy" if actual_reviewer == "codex" else "codex"
+
+                is_quota = (actual_reviewer in exhausted_providers)
+                if is_quota or (not rc and not valid_verdict(run)):
+                    alt = select_provider(actual_reviewer)
+                    if not alt:
+                        if is_quota:
+                            return exit_both_out_of_quota("review", round_no, actual_reviewer)
+                        status_write(card, started, "reviewer failure", round_no, actual_reviewer)
+                        emit_summary("ERROR", "invalid reviewer verdict")
+                        return 2
                     old_reviewer = actual_reviewer
-                    reviewer = other
-                    same_source = reviewer == builder
+                    actual_reviewer = alt
+                    reviewer = alt
+                    same_source = (reviewer == builder)
+                    review_model = "gpt-6-astra" if (actual_reviewer == "codex" and same_source) else ("gpt-6-luna" if actual_reviewer == "codex" else "gemini-3.8-flash-high")
+                    actual_reviewer_used = actual_reviewer
+                    actual_reviewer_model_used = review_model
                     try:
                         (run / "review.md").unlink()
                     except FileNotFoundError:
                         pass
-                    swap_target = "codex" if same_source else reviewer
-                    swap_material = make_review_material(card, run, repo, diff, report, swap_target)
+                    swap_material = make_review_material(card, run, repo, diff, report, actual_reviewer)
                     try:
-                        actual_reviewer, rc, review_out, same_source = swap_executor(
+                        actual_reviewer, review_model, rc, review_out, same_source = swap_executor(
                             "review", old_reviewer, reviewer, swap_material, repo, run, fallback,
-                            "quota" if QUOTA.search(review_out) else "invalid verdict", same_source,
-                            int(card["timeout_min"]) * 60, effort=review_effort)
+                            "quota" if is_quota else "invalid verdict", same_source,
+                            time_left(), effort=review_effort, call_fn=run_provider)
+                        actual_reviewer_used = actual_reviewer
+                        actual_reviewer_model_used = review_model
                     except TimeoutError:
                         status_write(card, started, "timeout", round_no, reviewer)
                         emit_summary("TIMEOUT", "review timed out")
                         return 2
-                    used.add("codex" if same_source else reviewer)
-                if rc and QUOTA.search(review_out):
-                    status_write(card, started, "quota", round_no, reviewer)
-                    emit_summary("QUOTA", "reviewer quota exhausted")
-                    return 2
+                    if rc and actual_reviewer in exhausted_providers:
+                        return exit_both_out_of_quota("review", round_no, actual_reviewer)
+
                 if rc:
-                    raise RuntimeError("reviewer failed")
+                    raise RuntimeError(f"reviewer {actual_reviewer} failed")
+
                 verdict_file = run / "review.md"
                 if not verdict_file.exists():
                     verdict_file.write_text(review_out, encoding="utf-8")
@@ -747,7 +968,7 @@ def run_card(card, quick=False):
                 passed = verdict[0] == "VERDICT: PASS"
 
             if passed:
-                disallowed = get_disallowed_files(repo, base, card.get("may_change", []), run)
+                disallowed = get_disallowed_files(repo, base, card.get("may_change", []), run, timeout=time_left())
                 if disallowed:
                     passed = False
                     msg = f"disallowed files changed: {', '.join(disallowed)}"
@@ -763,17 +984,18 @@ def run_card(card, quick=False):
         emit_summary("FAIL")
         status_write(card, started, "failed", rounds, builder)
         return 1
+    except TimeoutError as exc:
+        print(str(exc), file=sys.stderr)
+        status_write(card, started, "timeout", rounds, builder)
+        emit_summary("TIMEOUT", str(exc))
+        return 2
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         status_write(card, started, "error", rounds, builder)
         emit_summary("ERROR", f"error: {exc}")
         return 2
     finally:
-        if lock is not None:
-            try:
-                lock.unlink()
-            except FileNotFoundError:
-                pass
+        release_lock(lock)
 
 
 def main(argv=None):

@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 
@@ -160,7 +161,7 @@ def main():
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
         for scenario in (
-            "happy", "review", "check", "check_retry", "quota", "lock", "plan", "status", "timeout",
+            "happy", "review", "check", "check_retry", "quota", "lock", "plan", "plan_auto", "status", "timeout",
             "verdict", "agy_resume", "resume_failed", "agents_present", "utf8", "unexpected_error",
             "may_change_disallowed", "untracked_in_review", "dirty_worktree", "branch_not_resume",
             "exit_updates_summary", "report_blocked", "report_missing", "quick_review_skipped",
@@ -170,23 +171,23 @@ def main():
             repo = root / scenario
             builder = "agy" if scenario in ("agy_resume", "agents_present", "utf8", "codex_review_effort") else "codex"
             reviewer = "codex" if scenario in ("agy_resume", "utf8", "codex_review_effort") else "agy"
-            tier = "planned" if scenario == "plan" else ("quick" if scenario == "quick_review_skipped" else "standard")
+            tier = "planned" if scenario in ("plan", "plan_auto") else ("quick" if scenario == "quick_review_skipped" else "standard")
             run = setup(repo, builder=builder, reviewer=reviewer,
                         tier=tier,
-                        timeout_min="1" if scenario == "timeout" else "60")
+                        timeout_min="0.02" if scenario == "timeout" else "60")
             codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
             if scenario == "quota":
-                fake_codex(codex, "import os\nif os.environ.get('ORCH_STAGE') == 'build':\n print('RESOURCE_EXHAUSTED')\n raise SystemExit(1)\nprint('VERDICT: PASS')\n")
+                fake_codex(codex, "import os\nif os.environ.get('ORCH_STAGE') == 'build':\n print('RESOURCE_EXHAUSTED')\n raise SystemExit(1)\nif os.environ.get('ORCH_STAGE') == 'review':\n raise RuntimeError('codex called after quota exhaustion!')\nprint('VERDICT: PASS')\n")
             elif scenario == "review":
                 fake_codex(codex, "from pathlib import Path\nPath('result.txt').write_text('ok')\n")
             elif scenario == "timeout":
-                fake_codex(codex, "import time\ntime.sleep(1.2)\nfrom pathlib import Path\nPath('result.txt').write_text('ok')\n")
+                fake_codex(codex, "import time\ntime.sleep(2.0)\nfrom pathlib import Path\nPath('result.txt').write_text('ok')\n")
             elif scenario == "check_retry":
                 fake_codex(codex, "import os, sys\nfrom pathlib import Path\nprompt=sys.stdin.read()\nif os.environ.get('ORCH_STAGE') == 'build':\n Path('result.txt').write_text('ok')\n if 'No review was produced' in prompt: Path('no-review-context').write_text('ok')\n")
             elif scenario == "verdict":
                 fake_codex(codex, "import os\nfrom pathlib import Path\nif os.environ.get('ORCH_STAGE') == 'build': Path('result.txt').write_text('ok')\nelse: print('VERDICT: PASS')\n")
-            elif scenario == "plan":
-                fake_codex(codex, "import os\nfrom pathlib import Path\nPath(os.environ['ORCH_RUN'], 'plan.md').write_text('plan')\n")
+            elif scenario in ("plan", "plan_auto"):
+                fake_codex(codex, "import os\nfrom pathlib import Path\nPath(os.environ['ORCH_RUN'], 'plan.md').write_text('plan')\nPath('result.txt').write_text('ok')\n")
             elif scenario == "agy_resume":
                 fake_codex(codex, "import os\nfrom pathlib import Path\nrun=Path(os.environ['ORCH_RUN'])\np=run/'rev-count'\nn=int(p.read_text())+1 if p.exists() else 1\np.write_text(str(n))\nprint('VERDICT: FAIL' if n == 1 else 'VERDICT: PASS')\n")
             elif scenario == "resume_failed":
@@ -251,7 +252,9 @@ def main():
             else:
                 fake_codex(codex, "from pathlib import Path\nPath('result.txt').write_text('ok')\nprint('VERDICT: PASS')\n")
 
-            if scenario == "review":
+            if scenario == "plan":
+                fake_agy(agy, "import os\nif os.environ.get('ORCH_STAGE') == 'plan_review':\n print('VERDICT: NEEDS_INPUT\\nNeed user input')\nelse:\n print('VERDICT: PASS')\n")
+            elif scenario == "review":
                 fake_agy(agy, "import os, sys\nfrom pathlib import Path\nrun=Path(os.environ['ORCH_RUN'])\np=run/'review-count'\nn=int(p.read_text())+1 if p.exists() else 1\np.write_text(str(n))\nprint('VERDICT: FAIL' if n == 1 else 'VERDICT: PASS')\nprint('findings')\n")
             elif scenario == "reviewer_mutation":
                 fake_agy(agy, "from pathlib import Path\nPath('unauthorized.txt').write_text('bad reviewer mutation')\nprint('VERDICT: PASS')\n")
@@ -269,6 +272,8 @@ def main():
                 fake_agy(agy, "import sys\nsys.exit(99)\n")
             elif scenario == "codex_review_effort":
                 fake_agy(agy, "from pathlib import Path\nPath('result.txt').write_text('ok')\n")
+            elif scenario == "exit_updates_summary":
+                fake_agy(agy, "import sys\nprint('fatal quota error')\nraise SystemExit(1)\n")
             else:
                 fake_agy(agy, "from pathlib import Path\nPath('result.txt').write_text('ok')\nprint('VERDICT: PASS')\n")
 
@@ -295,25 +300,32 @@ def main():
 
             if scenario == "lock":
                 (run / "summary.md").write_text("RESULT: PASS\nOLD LOCK SUMMARY\nRUN_ID: old-lock-id\n", encoding="utf-8")
-                (repo / ".orchestrate" / "LOCK").write_text(f"{os.getpid()} case\n", encoding="utf-8")
-                result = execute(run, repo, codex, agy)
-                assert result.returncode == 2 and "lock" in result.stderr.lower()
-                assert (run / "summary.md").exists()
-                lock_sum = (run / "summary.md").read_text(encoding="utf-8")
-                assert "OLD LOCK SUMMARY" not in lock_sum
-                assert "RESULT: ERROR" in lock_sum
-                assert "RUN_ID:" in lock_sum and "old-lock-id" not in lock_sum
-                assert "lock" in lock_sum.lower()
+                sys.path.insert(0, str(SCRIPT.parent))
+                from orchestrate import take_lock, release_lock
+                holder = take_lock(repo, "case")
+                try:
+                    result = execute(run, repo, codex, agy)
+                    assert result.returncode == 2 and "lock" in result.stderr.lower()
+                    assert (run / "summary.md").exists()
+                    lock_sum = (run / "summary.md").read_text(encoding="utf-8")
+                    assert "OLD LOCK SUMMARY" not in lock_sum
+                    assert "RESULT: ERROR" in lock_sum
+                    assert "RUN_ID:" in lock_sum and "old-lock-id" not in lock_sum
+                    assert "lock" in lock_sum.lower()
+                finally:
+                    release_lock(holder)
             elif scenario == "plan":
                 result = execute(run, repo, codex, agy)
                 assert result.returncode == 2 and (run / "plan.md").exists()
+                assert "NEEDS_INPUT" in (run / "summary.md").read_text(encoding="utf-8")
+                assert "plan needs input" in (run / "status").read_text(encoding="utf-8")
             elif scenario == "status":
                 result = subprocess.run([sys.executable, str(SCRIPT), "status", str(run / "card.md")],
                                         cwd=repo, encoding="utf-8", errors="replace", capture_output=True)
                 assert result.returncode == 0 and len(result.stdout.strip().splitlines()) == 1
             else:
                 result = execute(run, repo, codex, agy)
-                expected = 2 if scenario in ("unexpected_error", "dirty_worktree", "branch_not_resume", "exit_updates_summary", "report_blocked", "diff_failure") else (
+                expected = 2 if scenario in ("unexpected_error", "dirty_worktree", "branch_not_resume", "exit_updates_summary", "report_blocked", "diff_failure", "timeout") else (
                     1 if scenario in ("check", "may_change_disallowed", "report_missing", "no_allowlist", "reviewer_mutation", "other_run_disallowed") else 0
                 )
                 assert result.returncode == expected, (scenario, result.returncode, result.stdout, result.stderr)
@@ -322,6 +334,15 @@ def main():
                 if scenario == "quota":
                     summary = (run / "summary.md").read_text(encoding="utf-8")
                     assert "same-source" in summary and "FALLBACK:" in summary
+                    assert "REVIEWER: agy (gemini-3.8-flash-high, same-source)" in summary
+                if scenario == "plan_auto":
+                    assert (run / "plan.md").exists()
+                    assert (repo / "result.txt").exists()
+                    assert "RESULT: PASS" in (run / "summary.md").read_text(encoding="utf-8")
+                if scenario == "timeout":
+                    summary = (run / "summary.md").read_text(encoding="utf-8")
+                    assert "RESULT: TIMEOUT" in summary
+                    assert "timeout" in (run / "status").read_text(encoding="utf-8")
                 if scenario == "check":
                     assert "ROUNDS: 2" in (run / "summary.md").read_text(encoding="utf-8")
                 if scenario == "check_retry":
@@ -483,5 +504,348 @@ def test_get_disallowed_files_direct():
         assert ".orchestrate/case/local_run_file.txt" not in get_disallowed_files(repo, base, ["result.txt"], run)
 
 
+def test_leftover_git_status_and_add_failures():
+    sys.path.insert(0, str(SCRIPT.parent))
+    from orchestrate import get_status_files, sync_untracked
+
+    # 1. git status failure: corrupt index -> get_status_files raises RuntimeError
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        repo.mkdir()
+        git(repo, "init", "-b", "main")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test")
+        (repo / "f.txt").write_text("hello", encoding="utf-8")
+        git(repo, "add", "f.txt")
+        git(repo, "commit", "-m", "init")
+
+        (repo / ".git" / "index").write_bytes(b"corrupt")
+        try:
+            get_status_files(repo)
+            assert False, "expected RuntimeError when git status fails"
+        except RuntimeError as exc:
+            assert "git status failed" in str(exc)
+
+    # 2. git add -N failure: index.lock exists -> sync_untracked raises RuntimeError
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        repo.mkdir()
+        git(repo, "init", "-b", "main")
+        git(repo, "config", "user.email", "test@example.com")
+        git(repo, "config", "user.name", "Test")
+        (repo / "f.txt").write_text("hello", encoding="utf-8")
+        git(repo, "add", "f.txt")
+        git(repo, "commit", "-m", "init")
+        (repo / "untracked.txt").write_text("untracked", encoding="utf-8")
+
+        (repo / ".git" / "index.lock").write_bytes(b"locked")
+        try:
+            sync_untracked(repo)
+            assert False, "expected RuntimeError when git add -N fails"
+        except RuntimeError as exc:
+            assert "git add -N failed" in str(exc)
+
+
+def test_finding_2_windows_locking():
+    sys.path.insert(0, str(SCRIPT.parent))
+    from orchestrate import take_lock, release_lock
+
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        repo.mkdir()
+
+        # 1. Lock acquisition and concurrent conflict
+        lock1 = take_lock(repo, "test1")
+        try:
+            take_lock(repo, "test2")
+            assert False, "expected RuntimeError when lock already held"
+        except RuntimeError as exc:
+            assert "another orchestrate run holds the repository lock" in str(exc)
+        finally:
+            release_lock(lock1)
+
+        # 2. After release, lock can be acquired again
+        lock2 = take_lock(repo, "test2")
+        release_lock(lock2)
+
+        # 3. Simulate process crash: child process acquires lock and exits without releasing
+        script_dir = str(SCRIPT.parent).replace('\\', '/')
+        repo_str = str(repo).replace('\\', '/')
+        res = subprocess.run([
+            sys.executable, "-c",
+            f"import sys; sys.path.insert(0, '{script_dir}'); from orchestrate import take_lock; from pathlib import Path; f = take_lock(Path('{repo_str}'), 'crasher'); sys.exit(0)"
+        ], capture_output=True, text=True)
+        assert res.returncode == 0
+
+        # OS must have released lock automatically; take_lock must succeed immediately without unlinking or PID check
+        lock3 = take_lock(repo, "test3")
+        assert (repo / ".orchestrate" / "LOCK").exists()
+        release_lock(lock3)
+
+
+def test_finding_3_check_timeout():
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy",
+                    check=f"{sys.executable} -c \"import time; time.sleep(2.0)\"",
+                    timeout_min="0.02")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, "from pathlib import Path\nPath('result.txt').write_text('ok')\n")
+        fake_agy(agy, "print('VERDICT: PASS')\n")
+
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 2, (result.returncode, result.stdout, result.stderr)
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: TIMEOUT" in summary
+        assert "check timed out" in summary
+        assert "TIMEOUT" in (run / "check.log").read_text(encoding="utf-8")
+
+
+def test_finding_8_quota_detection_and_tracking():
+    sys.path.insert(0, str(SCRIPT.parent))
+    from orchestrate import is_quota_error
+
+    # 1. returncode 0 is never a quota error even if text contains quota keywords
+    assert not is_quota_error(0, "429 Too Many Requests")
+    assert not is_quota_error(0, "RESOURCE_EXHAUSTED")
+
+    # 2. returncode != 0 with keyword in last 40 lines is a quota error
+    assert is_quota_error(1, "Error: RESOURCE_EXHAUSTED")
+    assert is_quota_error(1, "HTTP 429 rate limit exceeded")
+    assert is_quota_error(1, "\n".join(["normal line"] * 10 + ["usage limit reached"]))
+
+    # 3. returncode != 0 but keyword is outside last 40 lines is NOT a quota error
+    long_output = "Error: 429 quota exhausted\n" + "\n".join([f"line {i}" for i in range(50)])
+    assert not is_quota_error(1, long_output)
+
+    # 4. Both providers exhausted in a run -> exit 2 with RESULT: QUOTA
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, "import os\nif os.environ.get('ORCH_STAGE') == 'build':\n print('RESOURCE_EXHAUSTED')\n raise SystemExit(1)\n")
+        fake_agy(agy, "import os\nif os.environ.get('ORCH_STAGE') == 'build':\n print('429 rate limit exceeded')\n raise SystemExit(1)\n")
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 2
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: QUOTA" in summary
+        assert "quota exhausted" in summary
+
+    # 5. 401 Unauthorized is NOT a quota error
+    assert not is_quota_error(1, "401 Unauthorized")
+    assert not is_quota_error(1, "HTTP/1.1 401 Unauthorized\nInvalid authentication token")
+    assert not is_quota_error(1, "\n".join(["normal line"] * 10 + ["status code 401"]))
+
+
+def test_finding_13_no_tools_review_material():
+    sys.path.insert(0, str(SCRIPT.parent))
+    from orchestrate import make_review_material
+
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        repo.mkdir()
+        run = repo / ".orchestrate" / "case"
+        run.mkdir(parents=True)
+        card_file = run / "card.md"
+        card_file.write_text("---\nname: case\n---\nGoal: test\n", encoding="utf-8")
+        card = {"path": card_file}
+        diff = "diff --git a/f.txt b/f.txt\n"
+        report = run / "report.md"
+        report.write_text("STATUS: done\n", encoding="utf-8")
+        (run / "check.log").write_text("check ok\n", encoding="utf-8")
+
+        # agy review must include no-tools instruction
+        agy_mat = make_review_material(card, run, repo, diff, report, "agy")
+        assert "Do NOT use any tools or run commands; everything is in this message." in agy_mat
+
+        # codex review must NOT include no-tools instruction, and state read-only file inspection allowed
+        codex_mat = make_review_material(card, run, repo, diff, report, "codex")
+        assert "Do NOT use any tools or run commands" not in codex_mat
+        assert "You run read-only and may inspect files in the repository." in codex_mat
+
+
+def test_diffstat_failure_fails_closed():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import orchestrate
+
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, "from pathlib import Path\nPath('result.txt').write_text('ok')\n")
+        fake_agy(agy, "print('VERDICT: PASS')\n")
+
+        orig_git = orchestrate.git
+        def flaky_git(r, *args, **kwargs):
+            if "diff" in args and "--stat" in args:
+                raise RuntimeError("simulated git diff --stat failure")
+            return orig_git(r, *args, **kwargs)
+
+        orchestrate.git = flaky_git
+        try:
+            card = orchestrate.parse_card(run / "card.md")
+            os.environ["ORCH_CODEX"] = str(codex)
+            os.environ["ORCH_AGY"] = str(agy)
+            ret = orchestrate.run_card(card)
+            assert ret == 2, f"expected fail-closed returncode 2, got {ret}"
+            summary = (run / "summary.md").read_text(encoding="utf-8")
+            assert "RESULT: ERROR" in summary
+            assert "simulated git diff --stat failure" in summary
+            status = (run / "status").read_text(encoding="utf-8")
+            assert "error" in status
+            assert "complete" not in status
+        finally:
+            orchestrate.git = orig_git
+            os.environ.pop("ORCH_CODEX", None)
+            os.environ.pop("ORCH_AGY", None)
+
+
+def test_planned_tier_resumes_with_existing_plan():
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy", tier="planned")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, "from pathlib import Path\nPath('result.txt').write_text('ok')\n")
+
+        # 1. Pre-seed plan.md without plan_review.md (e.g. resume or pre-existing plan)
+        plan_file = run / "plan.md"
+        plan_file.write_text("pre-existing implementation plan\n", encoding="utf-8")
+        assert not (run / "plan_review.md").exists()
+
+        # Reviewer must be called for plan_review and can request input
+        fake_agy(agy, "import os\nif os.environ.get('ORCH_STAGE') == 'plan_review':\n print('VERDICT: NEEDS_INPUT\\nClarification needed on step 2')\nelse:\n print('VERDICT: PASS')\n")
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 2, f"expected returncode 2, got {result.returncode}"
+        assert (run / "plan_review.md").exists()
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: NEEDS_INPUT" in summary
+        assert "plan review requested input" in summary
+        status = (run / "status").read_text(encoding="utf-8")
+        assert "plan needs input" in status
+
+        # 2. Plan is updated and resumed: reviewer approves plan -> proceeds to build and passes
+        time.sleep(0.01)
+        plan_file.write_text("pre-existing implementation plan - updated with clarification\n", encoding="utf-8")
+        fake_agy(agy, "import os\nif os.environ.get('ORCH_STAGE') == 'plan_review':\n print('VERDICT: PASS\\nPlan approved')\nelse:\n print('VERDICT: PASS')\n")
+        result2 = execute(run, repo, codex, agy)
+        assert result2.returncode == 0, f"expected returncode 0 on resume approval, got {result2.returncode}"
+        summary2 = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: PASS" in summary2
+        assert (repo / "result.txt").exists()
+        status2 = (run / "status").read_text(encoding="utf-8")
+        assert "complete" in status2
+
+
+def test_emit_summary_deadline_expired_skips_git():
+    sys.path.insert(0, str(SCRIPT.parent))
+    import orchestrate
+
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy", timeout_min="0.001")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, "import time\ntime.sleep(0.1)\n")
+        fake_agy(agy, "print('VERDICT: PASS')\n")
+
+        calls = []
+        orig_git = orchestrate.git
+        def tracking_git(r, *args, **kwargs):
+            calls.append((args, kwargs.get("timeout")))
+            return orig_git(r, *args, **kwargs)
+
+        orchestrate.git = tracking_git
+        try:
+            card = orchestrate.parse_card(run / "card.md")
+            os.environ["ORCH_CODEX"] = str(codex)
+            os.environ["ORCH_AGY"] = str(agy)
+            ret = orchestrate.run_card(card)
+            assert ret == 2
+            # After deadline expired, git must NOT be called for diff --stat during summary
+            diff_stat_calls = [c for c in calls if len(c[0]) > 0 and c[0][0] == "diff" and "--stat" in c[0]]
+            assert len(diff_stat_calls) == 0, f"Git diff --stat should have been skipped after deadline expiry, got: {diff_stat_calls}"
+            summary = (run / "summary.md").read_text(encoding="utf-8")
+            assert "RESULT: TIMEOUT" in summary
+        finally:
+            orchestrate.git = orig_git
+            os.environ.pop("ORCH_CODEX", None)
+            os.environ.pop("ORCH_AGY", None)
+
+
+def test_quota_fallback_skips_exhausted_providers():
+    # 1. Build stage: both fake executors report quota -> exit 2, each called at most once per stage
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, (
+            "import os\n"
+            "with open('codex_calls.log', 'a', encoding='utf-8') as f:\n"
+            "    f.write(os.environ.get('ORCH_STAGE', '') + '\\n')\n"
+            "print('RESOURCE_EXHAUSTED 429')\n"
+            "raise SystemExit(1)\n"
+        ))
+        fake_agy(agy, (
+            "import os\n"
+            "with open('agy_calls.log', 'a', encoding='utf-8') as f:\n"
+            "    f.write(os.environ.get('ORCH_STAGE', '') + '\\n')\n"
+            "print('RESOURCE_EXHAUSTED 429')\n"
+            "raise SystemExit(1)\n"
+        ))
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 2, f"expected returncode 2, got {result.returncode}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: QUOTA" in summary
+        assert "both providers out of quota" in summary
+        codex_calls = (repo / "codex_calls.log").read_text(encoding="utf-8").splitlines()
+        agy_calls = (repo / "agy_calls.log").read_text(encoding="utf-8").splitlines()
+        assert codex_calls == ["build"], f"codex should be called exactly once for build, got: {codex_calls}"
+        assert agy_calls == ["build"], f"agy should be called exactly once for build, got: {agy_calls}"
+
+    # 2. Plan review stage: builder exhausts in plan, swapped builder succeeds; reviewer exhausts in plan review -> alternate (exhausted builder) is skipped -> exit 2
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy", tier="planned")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, (
+            "import os\n"
+            "with open('codex_calls.log', 'a', encoding='utf-8') as f:\n"
+            "    f.write(os.environ.get('ORCH_STAGE', '') + '\\n')\n"
+            "print('RESOURCE_EXHAUSTED 429')\n"
+            "raise SystemExit(1)\n"
+        ))
+        fake_agy(agy, (
+            "import os\n"
+            "from pathlib import Path\n"
+            "stage = os.environ.get('ORCH_STAGE', '')\n"
+            "with open('agy_calls.log', 'a', encoding='utf-8') as f:\n"
+            "    f.write(stage + '\\n')\n"
+            "if stage == 'plan':\n"
+            "    Path(os.environ['ORCH_RUN'], 'plan.md').write_text('plan content\\n', encoding='utf-8')\n"
+            "    print('plan ok')\n"
+            "else:\n"
+            "    print('RESOURCE_EXHAUSTED 429')\n"
+            "    raise SystemExit(1)\n"
+        ))
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 2, f"expected returncode 2, got {result.returncode}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: QUOTA" in summary
+        assert "both providers out of quota" in summary
+        codex_calls = (repo / "codex_calls.log").read_text(encoding="utf-8").splitlines()
+        agy_calls = (repo / "agy_calls.log").read_text(encoding="utf-8").splitlines()
+        assert codex_calls == ["plan"], f"codex should be called at most once in plan and never in plan_review, got: {codex_calls}"
+        assert agy_calls == ["plan", "plan_review"], f"agy should be called at most once per stage, got: {agy_calls}"
+
+
 if __name__ == "__main__":
     main()
+    test_leftover_git_status_and_add_failures()
+    test_finding_2_windows_locking()
+    test_finding_3_check_timeout()
+    test_finding_8_quota_detection_and_tracking()
+    test_finding_13_no_tools_review_material()
+    test_diffstat_failure_fails_closed()
+    test_planned_tier_resumes_with_existing_plan()
+    test_emit_summary_deadline_expired_skips_git()
+    test_quota_fallback_skips_exhausted_providers()
+
