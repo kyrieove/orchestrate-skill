@@ -195,19 +195,55 @@ def is_orchestrate_path(path):
     return p == ".orchestrate" or p.startswith(".orchestrate/")
 
 
-def sync_untracked(repo, run_dir=None, timeout=None):
+def file_sha256(path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            while chunk := f.read(65536):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def sync_untracked(repo, run_dir=None, timeout=None, untracked_base=None):
+    if untracked_base is None and run_dir:
+        state_file = Path(run_dir) / "state.json"
+        if state_file.exists():
+            try:
+                state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                untracked_base = state_data.get("untracked_base", state_data.get("untracked", {}))
+            except Exception:
+                pass
+    if untracked_base is None:
+        untracked_base = {}
+
     run_rel = os.path.relpath(run_dir, repo).replace("\\", "/") if run_dir else None
     for status, path in get_status_files(repo, timeout=timeout):
         p = path.replace("\\", "/")
+        if p == ".orchestrate" or p == ".orchestrate/LOCK":
+            continue
+        if run_rel and (p == run_rel or p.startswith(run_rel + "/")):
+            continue
+        if p in untracked_base:
+            file_p = repo / p
+            cur_sha = file_sha256(file_p) if file_p.is_file() else None
+            if cur_sha == untracked_base[p]:
+                if status != "??":
+                    git(repo, "reset", "HEAD", "--", path, check=False, timeout=timeout)
+                continue
         if status == "??":
-            if p == ".orchestrate" or p == ".orchestrate/LOCK":
-                continue
-            if run_rel and (p == run_rel or p.startswith(run_rel + "/")):
-                continue
             res = git(repo, "add", "-N", "--", path, check=False, timeout=timeout)
             if res.returncode != 0:
                 err = res.stderr.strip() or f"exit code {res.returncode}"
                 raise RuntimeError(f"git add -N failed for {path}: {err}")
+
+    missing = []
+    for p in untracked_base:
+        if not (repo / p).is_file():
+            missing.append(p)
+            git(repo, "reset", "HEAD", "--", p, check=False, timeout=timeout)
+    return missing
 
 
 def file_matches_any(path_str, patterns):
@@ -228,12 +264,23 @@ def file_matches_any(path_str, patterns):
     return False
 
 
-def get_disallowed_files(repo, base, may_change_globs, run_dir, timeout=None):
-    sync_untracked(repo, run_dir, timeout=timeout)
+def get_disallowed_files(repo, base, may_change_globs, run_dir, timeout=None, untracked_base=None):
+    if untracked_base is None and run_dir:
+        state_file = Path(run_dir) / "state.json"
+        if state_file.exists():
+            try:
+                state_data = json.loads(state_file.read_text(encoding="utf-8"))
+                untracked_base = state_data.get("untracked_base", state_data.get("untracked", {}))
+            except Exception:
+                pass
+    deleted = sync_untracked(repo, run_dir, timeout=timeout, untracked_base=untracked_base) or []
     res = git(repo, "diff", "--name-only", base, check=False, timeout=timeout)
     if res.returncode != 0:
         raise RuntimeError("git diff failed: " + (res.stderr.strip() or "exit code " + str(res.returncode)))
     changed = [line.strip().replace("\\", "/") for line in res.stdout.splitlines() if line.strip()]
+    for p in deleted:
+        if p not in changed:
+            changed.append(p)
     run_rel = os.path.relpath(run_dir, repo).replace("\\", "/")
     disallowed = []
     for f in changed:
@@ -435,7 +482,7 @@ def make_review_material(card, run, repo, diff, report, actual_reviewer):
         "\n".join((run / "check.log").read_text(encoding="utf-8").splitlines()[-40:]),
         "Report:",
         report.read_text(encoding="utf-8") if report.exists() else "missing",
-        "Write review.md. First line must be exactly VERDICT: PASS or VERDICT: FAIL, then findings."
+        "Do not create or modify any files: reply with the review text only. First line must be exactly VERDICT: PASS or VERDICT: FAIL, then findings."
     ]
     return "\n".join(material_parts)
 
@@ -483,6 +530,7 @@ def run_card(card, quick=False):
     fallback = []
     check_result = "not run"
     base = ""
+    untracked_base = {}
     is_quick = bool(quick or card.get("tier") == "quick")
     review_effort = card.get("review_effort") or "medium"
     repo = None
@@ -507,14 +555,19 @@ def run_card(card, quick=False):
             rem = deadline - time.monotonic()
             if rem > 0:
                 if result_str == "PASS":
-                    sync_untracked(repo, run, timeout=rem)
+                    deleted = sync_untracked(repo, run, timeout=rem, untracked_base=untracked_base) or []
                     stat = git(repo, "diff", "--stat", base, check=True, timeout=rem).stdout
                 else:
                     try:
-                        sync_untracked(repo, run, timeout=rem)
+                        deleted = sync_untracked(repo, run, timeout=rem, untracked_base=untracked_base) or []
                         stat = git(repo, "diff", "--stat", base, check=False, timeout=rem).stdout
                     except Exception:
-                        pass
+                        deleted = []
+                if deleted:
+                    stat_lines = [l for l in stat.splitlines() if l.strip()]
+                    for d in deleted:
+                        stat_lines.append(f" {d} | deleted")
+                    stat = "\n".join(stat_lines) + "\n"
             elif result_str == "PASS":
                 raise TimeoutError("overall run timeout expired")
         items = get_open_items(run, repo) if repo else "none"
@@ -595,7 +648,7 @@ def run_card(card, quick=False):
                 return 2
 
         if not is_resume:
-            dirty_files = [p for s, p in get_status_files(repo, timeout=time_left()) if not is_orchestrate_path(p)]
+            dirty_files = [p for s, p in get_status_files(repo, timeout=time_left()) if not is_orchestrate_path(p) and s != "??"]
             if dirty_files:
                 reason = f"dirty worktree: {', '.join(dirty_files)}"
                 status_write(card, started, "error", 0, builder)
@@ -603,11 +656,24 @@ def run_card(card, quick=False):
                 return 2
             base = head_sha
             git(repo, "checkout", "-b", branch, base, timeout=time_left())
+            untracked_base = {}
+            run_rel = os.path.relpath(run, repo).replace("\\", "/")
+            for s, p in get_status_files(repo, timeout=time_left()):
+                norm_p = p.replace("\\", "/")
+                if s == "??" and not is_orchestrate_path(norm_p):
+                    if norm_p == run_rel or norm_p.startswith(run_rel + "/"):
+                        continue
+                    file_p = repo / norm_p
+                    if file_p.is_file():
+                        h = file_sha256(file_p)
+                        if h is not None:
+                            untracked_base[norm_p] = h
             state = {
                 "card_hash": card_hash,
                 "base": base,
                 "created_at": started,
                 "run_id": run_id,
+                "untracked_base": untracked_base,
             }
             state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
         else:
@@ -615,6 +681,7 @@ def run_card(card, quick=False):
             curr_branch = git(repo, "branch", "--show-current", check=False, timeout=time_left()).stdout.strip()
             if curr_branch != branch:
                 git(repo, "checkout", branch, timeout=time_left())
+            untracked_base = state.get("untracked_base", state.get("untracked", {}))
             state["run_id"] = run_id
             state_file.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
 
@@ -841,7 +908,7 @@ def run_card(card, quick=False):
                     fallback.append(f"report.md status is {report_status or 'missing'} (expected 'done')")
 
             if passed:
-                disallowed = get_disallowed_files(repo, base, card.get("may_change", []), run, timeout=time_left())
+                disallowed = get_disallowed_files(repo, base, card.get("may_change", []), run, timeout=time_left(), untracked_base=untracked_base)
                 if disallowed:
                     passed = False
                     msg = f"disallowed files changed: {', '.join(disallowed)}"
@@ -864,8 +931,18 @@ def run_card(card, quick=False):
                 actual_reviewer_model_used = review_model
 
                 status_write(card, started, "review", round_no, actual_reviewer)
-                sync_untracked(repo, run, timeout=time_left())
+                deleted = sync_untracked(repo, run, timeout=time_left(), untracked_base=untracked_base) or []
                 diff = git(repo, "diff", base, timeout=time_left()).stdout
+                if deleted:
+                    diff_parts = [diff.rstrip("\n")] if diff.strip() else []
+                    for d in deleted:
+                        diff_parts.append(
+                            f"diff --git a/{d} b/{d}\n"
+                            f"deleted file mode 100644\n"
+                            f"--- a/{d}\n"
+                            f"+++ /dev/null"
+                        )
+                    diff = "\n".join(diff_parts) + "\n"
                 (run / "diff.patch").write_text(diff, encoding="utf-8")
                 report = run / "report.md"
                 material = make_review_material(card, run, repo, diff, report, actual_reviewer)
@@ -968,7 +1045,7 @@ def run_card(card, quick=False):
                 passed = verdict[0] == "VERDICT: PASS"
 
             if passed:
-                disallowed = get_disallowed_files(repo, base, card.get("may_change", []), run, timeout=time_left())
+                disallowed = get_disallowed_files(repo, base, card.get("may_change", []), run, timeout=time_left(), untracked_base=untracked_base)
                 if disallowed:
                     passed = False
                     msg = f"disallowed files changed: {', '.join(disallowed)}"

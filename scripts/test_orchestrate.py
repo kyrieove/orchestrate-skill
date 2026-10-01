@@ -294,7 +294,10 @@ def main():
             if scenario == "resume_failed":
                 (run / "card.md").write_text((run / "card.md").read_text(encoding="utf-8").replace("May change: result.txt", "May change: result.txt, failed-once"), encoding="utf-8")
             if scenario == "dirty_worktree":
-                (repo / "dirty.txt").write_text("uncommitted file", encoding="utf-8")
+                (repo / "dirty.txt").write_text("tracked base content\n", encoding="utf-8")
+                git(repo, "add", "dirty.txt")
+                git(repo, "commit", "-m", "add dirty.txt")
+                (repo / "dirty.txt").write_text("uncommitted tracked modification\n", encoding="utf-8")
             if scenario == "branch_not_resume":
                 git(repo, "branch", "orch/case")
 
@@ -502,6 +505,30 @@ def test_get_disallowed_files_direct():
         # 8. Files inside current run directory ARE exempted
         (run / "local_run_file.txt").write_text("in run\n", encoding="utf-8")
         assert ".orchestrate/case/local_run_file.txt" not in get_disallowed_files(repo, base, ["result.txt"], run)
+
+        # 9. Pre-existing untracked file in untracked_base unchanged -> not in disallowed
+        from orchestrate import file_sha256
+        (repo / "junk.txt").write_text("junk\n", encoding="utf-8")
+        junk_hash = file_sha256(repo / "junk.txt")
+        assert "junk.txt" not in get_disallowed_files(repo, base, ["result.txt"], run, untracked_base={"junk.txt": junk_hash})
+
+        # 10. Pre-existing untracked file in untracked_base modified and not in allowlist -> disallowed
+        (repo / "junk.txt").write_text("junk modified\n", encoding="utf-8")
+        assert "junk.txt" in get_disallowed_files(repo, base, ["result.txt"], run, untracked_base={"junk.txt": junk_hash})
+
+        # 11. Pre-existing untracked file in untracked_base modified and in allowlist -> allowed
+        assert "junk.txt" not in get_disallowed_files(repo, base, ["result.txt", "junk.txt"], run, untracked_base={"junk.txt": junk_hash})
+
+        # 12. Pre-existing untracked file restored back to original content -> unstaged, not in disallowed
+        (repo / "junk.txt").write_text("junk\n", encoding="utf-8")
+        assert "junk.txt" not in get_disallowed_files(repo, base, ["result.txt"], run, untracked_base={"junk.txt": junk_hash})
+
+        # 13. Pre-existing untracked file deleted and not in allowlist -> disallowed
+        (repo / "junk.txt").unlink()
+        assert "junk.txt" in get_disallowed_files(repo, base, ["result.txt"], run, untracked_base={"junk.txt": junk_hash})
+
+        # 14. Pre-existing untracked file deleted and in allowlist -> allowed
+        assert "junk.txt" not in get_disallowed_files(repo, base, ["result.txt", "junk.txt"], run, untracked_base={"junk.txt": junk_hash})
 
 
 def test_leftover_git_status_and_add_failures():
@@ -837,6 +864,184 @@ def test_quota_fallback_skips_exhausted_providers():
         assert agy_calls == ["plan", "plan_review"], f"agy should be called at most once per stage, got: {agy_calls}"
 
 
+def test_untracked_base_regression():
+    # 1. Pre-existing untracked junk: run starts and PASSes, junk not in diff/review/summary
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+
+        (repo / "junk.txt").write_text("pre-existing junk\n", encoding="utf-8")
+        (repo / "sub").mkdir(parents=True, exist_ok=True)
+        (repo / "sub" / "junk2.txt").write_text("nested junk\n", encoding="utf-8")
+
+        fake_codex(codex, "from pathlib import Path\nPath('result.txt').write_text('ok')\n")
+        fake_agy(agy, (
+            "import sys\n"
+            "prompt = sys.stdin.read()\n"
+            "assert 'junk.txt' not in prompt, 'junk.txt leaked into review prompt'\n"
+            "assert 'junk2.txt' not in prompt, 'junk2.txt leaked into review prompt'\n"
+            "assert 'result.txt' in prompt, 'result.txt missing from review prompt'\n"
+            "print('VERDICT: PASS')\n"
+        ))
+
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 0, f"expected PASS (0), got {result.returncode}: {result.stderr}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: PASS" in summary
+        assert "junk" not in summary
+        assert "DIFF: result.txt" in summary
+
+        diff_patch = (run / "diff.patch").read_text(encoding="utf-8")
+        assert "junk" not in diff_patch
+        assert "result.txt" in diff_patch
+
+        state = json.loads((run / "state.json").read_text(encoding="utf-8"))
+        assert "junk.txt" in state.get("untracked_base", {})
+        assert "sub/junk2.txt" in state.get("untracked_base", {})
+
+    # 2. Pre-existing untracked file modified by builder -> counted
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+
+        (repo / "pre_mod.txt").write_text("pre-existing base content\n", encoding="utf-8")
+        (run / "card.md").write_text(
+            (run / "card.md").read_text(encoding="utf-8").replace("May change: result.txt", "May change: result.txt, pre_mod.txt"),
+            encoding="utf-8"
+        )
+
+        fake_codex(codex, (
+            "from pathlib import Path\n"
+            "Path('result.txt').write_text('ok')\n"
+            "Path('pre_mod.txt').write_text('modified by builder\\n')\n"
+        ))
+        fake_agy(agy, (
+            "import sys\n"
+            "prompt = sys.stdin.read()\n"
+            "assert 'pre_mod.txt' in prompt, 'pre_mod.txt should be in review prompt'\n"
+            "assert 'result.txt' in prompt, 'result.txt should be in review prompt'\n"
+            "print('VERDICT: PASS')\n"
+        ))
+
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 0, f"expected PASS (0), got {result.returncode}: {result.stderr}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: PASS" in summary
+        assert "pre_mod.txt" in summary
+        diff_patch = (run / "diff.patch").read_text(encoding="utf-8")
+        assert "pre_mod.txt" in diff_patch
+
+    # 2b. Pre-existing untracked file modified by builder but not in May change -> counted & disallowed
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+
+        (repo / "unauth_untracked.txt").write_text("pre-existing untracked\n", encoding="utf-8")
+        fake_codex(codex, (
+            "from pathlib import Path\n"
+            "Path('result.txt').write_text('ok')\n"
+            "Path('unauth_untracked.txt').write_text('modified unauthorized\\n')\n"
+        ))
+        fake_agy(agy, "print('VERDICT: PASS')\n")
+
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 1, f"expected FAIL (1), got {result.returncode}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: FAIL" in summary
+        assert "disallowed files changed: unauth_untracked.txt" in summary
+
+    # 2c. Pre-existing untracked file deleted by builder -> counted & in review diff/summary
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+
+        (repo / "pre_del.txt").write_text("pre-existing untracked to be deleted\n", encoding="utf-8")
+        (run / "card.md").write_text(
+            (run / "card.md").read_text(encoding="utf-8").replace("May change: result.txt", "May change: result.txt, pre_del.txt"),
+            encoding="utf-8"
+        )
+
+        fake_codex(codex, (
+            "from pathlib import Path\n"
+            "Path('result.txt').write_text('ok')\n"
+            "Path('pre_del.txt').unlink()\n"
+        ))
+        fake_agy(agy, (
+            "import sys\n"
+            "prompt = sys.stdin.read()\n"
+            "assert 'pre_del.txt' in prompt, 'pre_del.txt should be in review prompt'\n"
+            "assert 'result.txt' in prompt, 'result.txt should be in review prompt'\n"
+            "print('VERDICT: PASS')\n"
+        ))
+
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 0, f"expected PASS (0), got {result.returncode}: {result.stderr}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: PASS" in summary
+        assert "pre_del.txt" in summary
+        diff_patch = (run / "diff.patch").read_text(encoding="utf-8")
+        assert "pre_del.txt" in diff_patch
+
+    # 2d. Pre-existing untracked file deleted by builder but not in May change -> disallowed
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+
+        (repo / "pre_del_unauth.txt").write_text("unauthorized deletion target\n", encoding="utf-8")
+        fake_codex(codex, (
+            "from pathlib import Path\n"
+            "Path('result.txt').write_text('ok')\n"
+            "p = Path('pre_del_unauth.txt')\n"
+            "if p.exists(): p.unlink()\n"
+        ))
+        fake_agy(agy, "print('VERDICT: PASS')\n")
+
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 1, f"expected FAIL (1), got {result.returncode}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: FAIL" in summary
+        assert "disallowed files changed: pre_del_unauth.txt" in summary
+
+    # 3. Tracked modification at start -> refused
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, "from pathlib import Path\nPath('result.txt').write_text('ok')\n")
+        fake_agy(agy, "print('VERDICT: PASS')\n")
+
+        # 3a. Unstaged tracked modification
+        (repo / "check.py").write_text("# unstaged tracked modification\n", encoding="utf-8")
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 2, f"expected ERROR (2), got {result.returncode}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: ERROR" in summary
+        assert "dirty worktree" in summary
+        assert "check.py" in summary
+
+    with tempfile.TemporaryDirectory() as temp:
+        repo = Path(temp) / "repo"
+        run = setup(repo, builder="codex", reviewer="agy")
+        codex, agy = repo / "fake-codex.py", repo / "fake-agy.py"
+        fake_codex(codex, "from pathlib import Path\nPath('result.txt').write_text('ok')\n")
+        fake_agy(agy, "print('VERDICT: PASS')\n")
+
+        # 3b. Staged modification at start
+        (repo / "staged.txt").write_text("staged file\n", encoding="utf-8")
+        git(repo, "add", "staged.txt")
+        result = execute(run, repo, codex, agy)
+        assert result.returncode == 2, f"expected ERROR (2), got {result.returncode}"
+        summary = (run / "summary.md").read_text(encoding="utf-8")
+        assert "RESULT: ERROR" in summary
+        assert "dirty worktree" in summary
+        assert "staged.txt" in summary
+
+
 if __name__ == "__main__":
     main()
     test_leftover_git_status_and_add_failures()
@@ -848,4 +1053,5 @@ if __name__ == "__main__":
     test_planned_tier_resumes_with_existing_plan()
     test_emit_summary_deadline_expired_skips_git()
     test_quota_fallback_skips_exhausted_providers()
+    test_untracked_base_regression()
 
