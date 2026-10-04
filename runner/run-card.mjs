@@ -332,6 +332,11 @@ if (isFix) {
     process.exit(2);
   }
 }
+// --reviewer sol: shared tooling gets the high-tier reviewer at medium risk (SKILL.md Review).
+if (args.reviewer !== undefined && !["luna", "sol"].includes(args.reviewer)) {
+  console.error("Invalid reviewer:", args.reviewer);
+  process.exit(2);
+}
 
 let timeoutMin = 100;
 if (timeoutMinArg !== undefined) {
@@ -965,7 +970,9 @@ if (!state.outcome) {
   } else {
     state.stage = "reviewing";
     let reviewer;
-    if (executor === "luna" || executor === "sol") {
+    if (args.reviewer) {
+      reviewer = args.reviewer === "sol" ? "gpt-6.1-sol" : "gpt-6-luna";
+    } else if (executor === "luna" || executor === "sol") {
       reviewer = "gpt-6.1-sol";
     } else if (risk === "high") {
       reviewer = "gpt-6.1-sol";

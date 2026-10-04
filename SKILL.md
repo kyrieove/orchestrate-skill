@@ -97,7 +97,7 @@ conformance review catches a wrong number; only an independent recompute does.
    hashes, runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
    prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
-   change is out of scope. `--timeout-min` (default 100, the Bash job dies at 120). Not a git repo: works on a
+   change is out of scope. `--timeout-min` (default 100, the Bash job dies at 120). `--reviewer sol`: shared tooling at medium risk (Review layer 2). Not a git repo: works on a
    size/mtime snapshot; `--commit` refuses. State: `~/.claude/agent-live/orch-runner/<name>.json`.
    **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
    run in the background with `node ~/.claude/skills/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`
