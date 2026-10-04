@@ -8,11 +8,16 @@ import { fileURLToPath } from "node:url";
 const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
 
 function parseArgs(args) {
+  const booleanFlags = new Set(["recon"]);
   const parsed = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg.startsWith("--")) {
       const key = arg.slice(2);
+      if (booleanFlags.has(key)) {
+        parsed[key] = true;
+        continue;
+      }
       const val = args[i + 1];
       if (val !== undefined && !val.startsWith("--")) {
         parsed[key] = val;
@@ -45,10 +50,80 @@ function getSection(text, title) {
   return inSection ? sectionLines.join("\n") : null;
 }
 
+function lintCard(cardText) {
+  const problems = [];
+  const requiredSections = ["Goal", "Risk", "Files", "Steps", "Don't"];
+  if (!recon) {
+    requiredSections.push("Check");
+  }
+  for (const sec of requiredSections) {
+    if (getSection(cardText, sec) === null) {
+      problems.push(`missing ## ${sec} section`);
+    }
+  }
+
+  const riskSection = getSection(cardText, "Risk");
+  if (riskSection !== null) {
+    const firstWord = riskSection.trim().split(/\s+/)[0]?.toLowerCase();
+    if (firstWord !== (risk ?? "").toLowerCase()) {
+      problems.push(`Risk '${firstWord}' does not match --risk '${risk}'`);
+    }
+  }
+
+  const stepsLine = cardText.split(/\r?\n/).find((l) => /^##\s+Steps\b/i.test(l)) || "";
+  const stepsSection = getSection(cardText, "Steps") || "";
+  if (!/N\s*=\s*\d+/.test(stepsLine) && !/N\s*=\s*\d+/.test(stepsSection)) {
+    problems.push("Steps section heading or body must match /N\\s*=\\s*\\d+/");
+  }
+
+  const dontSection = getSection(cardText, "Don't");
+  if (dontSection !== null) {
+    const requiredDontPhrases = [
+      "Run scripts in the foreground and wait",
+      "Reuse existing functions",
+      "No rm, no git push"
+    ];
+    for (const phrase of requiredDontPhrases) {
+      if (!dontSection.includes(phrase)) {
+        problems.push(`Don't section missing phrase: "${phrase}"`);
+      }
+    }
+  }
+
+  if (!recon) {
+    const filesSection = getSection(cardText, "Files") || "";
+    const roIdx = filesSection.search(/read-only/i);
+    const beforeRo = roIdx >= 0 ? filesSection.slice(0, roIdx) : filesSection;
+    if (!/`[^`]+`/.test(beforeRo)) {
+      problems.push("Files section before read-only must have at least one backticked path");
+    }
+
+    const checkSection = getSection(cardText, "Check") || "";
+    const hasFenced = /```[\s\S]*?```/.test(checkSection);
+    const hasInline = /`[^`]+`/.test(checkSection);
+    if (!hasFenced && !hasInline) {
+      problems.push("Check section must have a fenced block or backticked span");
+    }
+  }
+
+  return problems;
+}
+
+function isJunkPath(repoRelPath) {
+  const norm = repoRelPath.replaceAll("\\", "/");
+  const segments = norm.split("/");
+  if (segments.includes("__pycache__")) return true;
+  const base = path.posix.basename(norm);
+  if (base.endsWith(".log")) return true;
+  if (base.startsWith("tmp")) return true;
+  return false;
+}
+
 // 1. Args & Card Parsing
 const rawArgs = process.argv.slice(2);
 const args = parseArgs(rawArgs);
 
+const recon = args.recon === true;
 const card = args.card;
 const name = args.name;
 const executor = args.executor;
@@ -104,24 +179,32 @@ const cardBytes = fs.readFileSync(cardAbs);
 const cardText = cardBytes.toString("utf8");
 const cardSha = crypto.createHash("sha256").update(cardBytes).digest("hex");
 
+const lintProblems = lintCard(cardText);
+if (lintProblems.length > 0) {
+  for (const prob of lintProblems) {
+    console.error(`lint: ${prob}`);
+  }
+  process.exit(2);
+}
+
 const checkSection = getSection(cardText, "Check");
-if (checkSection === null) {
+let check = null;
+if (checkSection !== null) {
+  const fencedMatch = checkSection.match(/```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)```/);
+  if (fencedMatch) {
+    check = fencedMatch[1].trim();
+  } else {
+    const inlineMatch = checkSection.match(/`([^`]+)`/);
+    if (inlineMatch) {
+      check = inlineMatch[1].trim();
+    }
+  }
+} else if (!recon) {
   console.error("No ## Check section found in card");
   process.exit(2);
 }
 
-let check = null;
-const fencedMatch = checkSection.match(/```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)```/);
-if (fencedMatch) {
-  check = fencedMatch[1].trim();
-} else {
-  const inlineMatch = checkSection.match(/`([^`]+)`/);
-  if (inlineMatch) {
-    check = inlineMatch[1].trim();
-  }
-}
-
-if (!check) {
+if (!check && !recon) {
   console.error("No check command found in ## Check");
   process.exit(2);
 }
@@ -144,8 +227,37 @@ const exemptPaths = new Set([
   taskDir === "." ? "review.md" : `${taskDir}/review.md`
 ]);
 
-// 2. State file
 const liveDir = (process.env.ORCH_RUNNER_LIVE_DIR || path.posix.join(os.homedir().replaceAll("\\", "/"), ".claude/agent-live"));
+const normLiveDir = path.resolve(liveDir).replaceAll("\\", "/");
+
+const readOnlyRaw = [];
+if (readOnlyIdx >= 0) {
+  const afterReadOnly = filesSection.slice(readOnlyIdx + "read-only".length);
+  for (const m of afterReadOnly.matchAll(/`([^`]+)`/g)) {
+    readOnlyRaw.push(m[1].trim());
+  }
+}
+
+const readOnlyPaths = [];
+for (const p of readOnlyRaw) {
+  let resolved;
+  if (p.startsWith("~/") || p === "~") {
+    resolved = path.resolve(os.homedir(), p.slice(p === "~" ? 1 : 2));
+  } else if (path.isAbsolute(p)) {
+    resolved = path.resolve(p);
+  } else {
+    resolved = path.resolve(repoAbs, p);
+  }
+  resolved = resolved.replaceAll("\\", "/");
+
+  if (!fs.existsSync(resolved)) continue;
+  if (resolved === normLiveDir || resolved.startsWith(normLiveDir + "/")) continue;
+  if (resolved === cardDirNorm || resolved.startsWith(cardDirNorm + "/")) continue;
+
+  readOnlyPaths.push(resolved);
+}
+
+// 2. State file
 const stateDir = path.posix.join(liveDir, "orch-runner");
 fs.mkdirSync(stateDir, { recursive: true });
 
@@ -160,6 +272,7 @@ function save(st) {
 
 const state = {
   name,
+  recon,
   card: cardAbs,
   cardSha,
   executor,
@@ -172,8 +285,11 @@ const state = {
   outcome: null,
   before: null,
   after: null,
+  readOnlyBefore: null,
+  readOnlyChanged: null,
   touched: null,
   outOfScope: null,
+  junk: null,
   exec: { exit: null, status: null, seconds: null, reply: null },
   checkResult: { exit: null, log: null },
   review: { model: null, verdict: null },
@@ -236,7 +352,79 @@ function snapshot() {
   return result;
 }
 
+function statTree(paths) {
+  const result = {};
+
+  function walk(dir) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git") continue;
+      const fullPath = path.posix.join(dir, entry.name);
+      try {
+        if (entry.isDirectory()) {
+          walk(fullPath);
+        } else if (entry.isFile()) {
+          const st = fs.statSync(fullPath);
+          result[fullPath] = [st.size, st.mtimeMs];
+        }
+      } catch {}
+    }
+  }
+
+  for (const p of paths) {
+    const absP = path.resolve(p).replaceAll("\\", "/");
+    if (!fs.existsSync(absP)) continue;
+    try {
+      const st = fs.statSync(absP);
+      if (st.isDirectory()) {
+        walk(absP);
+      } else if (st.isFile()) {
+        result[absP] = [st.size, st.mtimeMs];
+      }
+    } catch {}
+  }
+
+  return result;
+}
+
+function getReadOnlyDiff(beforeStats, paths) {
+  const currentStats = statTree(paths);
+  const beforeKeys = Object.keys(beforeStats || {});
+  const currentKeys = Object.keys(currentStats || {});
+  const allKeys = new Set([...beforeKeys, ...currentKeys]);
+  const diffs = [];
+
+  for (const k of allKeys) {
+    const b = beforeStats ? beforeStats[k] : undefined;
+    const c = currentStats ? currentStats[k] : undefined;
+    if (!b || !c) {
+      diffs.push(k);
+    } else if (b[0] !== c[0] || b[1] !== c[1]) {
+      diffs.push(k);
+    }
+  }
+
+  if (diffs.length === 0) return null;
+
+  const repoPrefix = repoAbs.endsWith("/") ? repoAbs : repoAbs + "/";
+  const formatted = diffs.map((absP) => {
+    if (absP === repoAbs) return ".";
+    if (absP.startsWith(repoPrefix)) {
+      return path.posix.relative(repoAbs, absP);
+    }
+    return absP;
+  });
+  formatted.sort();
+  return formatted;
+}
+
 state.before = snapshot();
+state.readOnlyBefore = statTree(readOnlyPaths);
 save(state);
 
 for (const prefix of ["agy", "codex", "codex-review"]) {
@@ -298,7 +486,9 @@ function runBash(cmd, { cwd, timeoutMin, exitPath }) {
 // 4. Executor
 const progressPrefix = (executor === "agy" || process.env.ORCH_RUNNER_FAKE_EXEC) ? "agy" : "codex";
 const progressLine = `after starting, append \`0/N 已完成：无 · 正在：<第1步>\`, and after finishing each step append \`k/N 已完成：X · 正在：Y\` (Chinese; Y names the file / function and the action, 15–30 characters, e.g. \`2/5 已完成：读 README · 正在：在 README 的 Demo 前插入 Quota row 一节\`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to ${liveDir}/${progressPrefix}-${name}.progress. Just append; do not open, list or inspect that directory or any other file to learn the format.`;
-const execPrompt = `Read ${cardAbs} and carry out every step exactly; run only the commands the Steps name; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. ${progressLine}`;
+const execPrompt = recon
+  ? `Read ${cardAbs} and answer what it asks. This is read-only: do not create, modify or delete any file; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then the answer. ${progressLine}`
+  : `Read ${cardAbs} and carry out every step exactly; run only the commands the Steps name; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. ${progressLine}`;
 
 let S;
 if (process.env.ORCH_RUNNER_FAKE_EXEC || executor === "agy") {
@@ -358,7 +548,7 @@ if (execResult.timedOut) {
   if (reply === null || reply === undefined) {
     const content = fs.existsSync(S) ? fs.readFileSync(S, "utf8") : "";
     const nonEmpty = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    reply = nonEmpty.slice(-15).join("\n");
+    reply = nonEmpty.slice(-(recon ? 40 : 15)).join("\n");
   }
 
   const statusMatch = reply.match(/^STATUS:\s*(done|blocked|failed)\b/m);
@@ -377,6 +567,15 @@ if (execResult.timedOut) {
     save(state);
   } else if (status === "blocked") {
     state.outcome = "blocked";
+    save(state);
+  }
+}
+
+if (!state.outcome && state.readOnlyBefore) {
+  const roDiff = getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths);
+  if (roDiff) {
+    state.outcome = "readonly_violated";
+    state.readOnlyChanged = roDiff;
     save(state);
   }
 }
@@ -404,13 +603,17 @@ if (!state.outcome) {
 
   const outOfScope = [];
   for (const p of touched) {
-    const allowed = mayChange.some((entry) => entry.endsWith("/") ? p.startsWith(entry) : p === entry);
+    const allowed = !recon && mayChange.some((entry) => entry.endsWith("/") ? p.startsWith(entry) : p === entry);
     if (!allowed) {
       outOfScope.push(p);
     }
   }
   outOfScope.sort();
   state.outOfScope = outOfScope;
+
+  const junk = outOfScope.filter(isJunkPath);
+  junk.sort();
+  state.junk = junk;
 
   const cardNowBytes = fs.readFileSync(cardAbs);
   const cardNowSha = crypto.createHash("sha256").update(cardNowBytes).digest("hex");
@@ -421,6 +624,11 @@ if (!state.outcome) {
     state.outcome = "out_of_scope";
     save(state);
   }
+}
+
+if (recon && !state.outcome) {
+  state.outcome = "recon_done";
+  save(state);
 }
 
 // 6. Check
@@ -441,6 +649,16 @@ if (!state.outcome) {
 
     if (checkRes.exit !== 0) {
       state.outcome = "check_failed";
+      save(state);
+    }
+  }
+
+  // Runs whatever the Check's outcome: a failing Check may still have written to read-only data.
+  if (state.readOnlyBefore) {
+    const roDiff = getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths);
+    if (roDiff) {
+      state.outcome = "readonly_violated";
+      state.readOnlyChanged = roDiff;
       save(state);
     }
   }
@@ -481,7 +699,28 @@ if (!state.outcome) {
       reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } > ${q(reviewStream)} 2>&1`;
     }
 
-    const reviewRes = await runBash(reviewCmd, { cwd: repoAbs, timeoutMin, exitPath: reviewExit });
+    let reviewRes = await runBash(reviewCmd, { cwd: repoAbs, timeoutMin, exitPath: reviewExit });
+
+    if (!reviewRes.timedOut && reviewRes.exit === 0) {
+      let firstLine = "";
+      if (fs.existsSync(reviewMdAbs)) {
+        const content = fs.readFileSync(reviewMdAbs, "utf8");
+        const lines = content.split(/\r?\n/);
+        firstLine = lines[0]?.trim() ?? "";
+      }
+
+      if (firstLine !== "VERDICT: PASS" && firstLine !== "VERDICT: FAIL") {
+        fs.rmSync(reviewMdAbs, { force: true });
+        let retryCmd;
+        if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
+          retryCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} >> ${q(reviewStream)} 2>&1`;
+        } else {
+          retryCmd = `{ echo '{"model":"${reviewer}"}'; codex exec -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } >> ${q(reviewStream)} 2>&1`;
+        }
+        state.review.retried = true;
+        reviewRes = await runBash(retryCmd, { cwd: repoAbs, timeoutMin, exitPath: reviewExit });
+      }
+    }
 
     if (reviewRes.timedOut) {
       state.outcome = "interrupted";
@@ -541,9 +780,14 @@ const execMins = state.exec?.seconds != null ? (state.exec.seconds / 60).toFixed
 lines.push(`executor: ${executor} exit=${execExit} status=${execStatus} ${execMins}m`);
 
 const touchedStr = state.touched && state.touched.length > 0 ? state.touched.join(", ") : "-";
-const outOfScopeStr = state.outOfScope && state.outOfScope.length > 0 ? state.outOfScope.join(", ") : "-";
+const nonJunkOutOfScope = (state.outOfScope || []).filter((p) => !isJunkPath(p));
+const outOfScopeStr = nonJunkOutOfScope.length > 0 ? nonJunkOutOfScope.join(", ") : "-";
+const junkStr = (state.junk && state.junk.length > 0) ? `   junk: ${state.junk.join(", ")}` : "";
 const cardModStr = state.cardModified ? "yes" : "no";
-lines.push(`touched: ${touchedStr}   out of scope: ${outOfScopeStr}   card modified: ${cardModStr}`);
+lines.push(`touched: ${touchedStr}   out of scope: ${outOfScopeStr}${junkStr}   card modified: ${cardModStr}`);
+if (state.readOnlyChanged && state.readOnlyChanged.length > 0) {
+  lines.push(`read-only changed: ${state.readOnlyChanged.join(", ")}`);
+}
 
 const checkExit = state.checkResult?.exit !== null && state.checkResult?.exit !== undefined ? state.checkResult.exit : "skipped";
 lines.push(`check: exit=${checkExit} \`${check}\``);
@@ -565,7 +809,8 @@ if (state.review?.model) {
     firstLine = revLines[0]?.trim() || "-";
     restLines = revLines.slice(1, 13).filter((l) => l !== undefined);
   }
-  lines.push(`review: ${state.review.model} ${firstLine}`);
+  const retriedSuffix = state.review?.retried ? " (retried)" : "";
+  lines.push(`review: ${state.review.model} ${firstLine}${retriedSuffix}`);
   if (restLines.length > 0 && restLines.some((l) => l.trim())) {
     lines.push(restLines.join("\n"));
   }
@@ -588,7 +833,7 @@ lines.push(state.ledger ?? "n/a");
 
 lines.push(`reply:`);
 const replyLines = (state.exec?.reply ?? "").split(/\r?\n/);
-const replyTail = replyLines.slice(-15).join("\n");
+const replyTail = replyLines.slice(-(recon ? 40 : 15)).join("\n");
 lines.push(replyTail);
 
 lines.push(`state: ${stateFile}`);
