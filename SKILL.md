@@ -109,6 +109,8 @@ conformance review catches a wrong number; only an independent recompute does.
    - `tokens:` the output of `node ~/.claude/skills/orchestrate/ledger.mjs <name>` (one row per executor and reviewer run),
      taken before any same-name dispatch clears the streams; fix rounds add their own row.
    - `review findings:` N real / M false positive / K missed (a bug found later by Claude or a later review), with tier and reviewer.
+     When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
+     with where it was found and the fix commit, then commit the card. Long runs get the same two lines (the run itself adds no executor row).
    After 10–15 cards, change the Modes table from these rows, not from impressions (user, 2026-10-04).
    If the project keeps a code log (e.g. `docs/review-log.md`), add one line pointing at the card. Analysis logs follow the
    project's CLAUDE.md rules.
