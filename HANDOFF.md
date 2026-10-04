@@ -1,5 +1,9 @@
 # HANDOFF · orchestrate
 
+仓库位置（2026-10-05 起）：`D:/2/dev/orch-runner/orchestrate`。`~/.claude/skills/orchestrate` 是指向它的 junction，
+Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.claude` 里面的路径每次编辑都要确认）。
+旧副本备份在 `~/.claude/_archive/2026-10-05/orchestrate`。
+
 ## 待办：orch-runner（mod 辅助 orchestrate，省 Claude token）—— 2026-10-05 定方案，下一步开工
 
 **目的**：orchestrate 仍是大脑（选执行者、定风险、写卡、验收）；runner 是 0 token 的 mod，接管中间的机械步骤，
