@@ -4,41 +4,45 @@
 Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.claude` 里面的路径每次编辑都要确认）。
 旧副本备份在 `~/.claude/_archive/2026-10-05/orchestrate`。
 
-## 待办：orch-runner（mod 辅助 orchestrate，省 Claude token）—— 2026-10-05 定方案，下一步开工
+## 进行中：orch-runner（脚本辅助 orchestrate，省 Claude token）
 
-**目的**：orchestrate 仍是大脑（选执行者、定风险、写卡、验收）；runner 是 0 token 的 mod，接管中间的机械步骤，
+**目的**：orchestrate 仍是大脑（选执行者、定风险、写卡、验收）；runner 接管中间的机械步骤，
 每张卡把 Claude 的唤醒从 3 次减到 2 次（派发、验收）。
 
-**已定**
-- 位置：本仓库 `runner/` 子目录，作为独立插件安装（`runner/.claude-plugin/plugin.json` + `runner/hooks/orch-runner.mjs`）。
-  skill 不搬家，`/orch /agy /luna /sol` 不变。同一仓库保证规则和代码一起改。
-- SKILL.md 保留手动派发的命令模板作后备：runner 没装或出错时照旧手动走。
-- token-weather 不改：runner 写同样的 `~/.claude/agent-live/<name>.{jsonl,progress,exit}`，进度条照常显示。
-- 先做 MVP，用卡片 Acceptance 的 `tokens:` 行对比省了多少，再扩展。
+**已定（2026-10-05）**
+- **不做 mod，做普通 node 脚本** `runner/run-card.mjs`：Claude 用 Bash `run_in_background` 启动它，
+  它顺序跑 执行者 → Check → Files 比对 → ledger → 审查，打印摘要后退出；后台完成通知唤醒 Claude 一次。
+  这样没有热重载杀进程、会话认领的问题；Bash 命令里字面写出 `agent-live/<name>.jsonl`，token-weather 进度条照常显示
+  （mod 用 `$.process.run` 起执行者反而不会被 token-weather 认领）。
+- 风险、执行者作为参数传；Check 和 Files 从卡片 `## Check`、`## Files` 的反引号里读。
+- **Check 归 runner**：执行者不跑 Check，runner 在执行者退出后跑一次并记录退出码（独立凭据）。
+- 执行者回复首行 `STATUS: done|blocked|failed`；失败分 failed / blocked / interrupted（超时，`taskkill /T` 杀进程树），一律不重试、直接结束并报告。
+- 修复轮（`## Fix N`）先不走 runner，照旧手动。
+- 吸收了 `C:/dev/brain-plot/docs/orchestrate-recommendations-2026-10-05.md` 的 1–3 条：脏文件 before/after 用 `git hash-object`
+  比内容（`git status` 看不出二次修改）；每张卡一个状态文件 `~/.claude/agent-live/orch-runner/<name>.json`；时间上限。4 已有（300k 换会话），5 以后。
+- SKILL.md 保留手动派发模板作后备；runner 验证通过后再改 SKILL.md 的 Flow / Commands。
 
-**MVP 范围**
-1. 注册工具 `orch_run(card, executor, risk, name)`，立即返回。
-2. 拍 before 快照（`git status --short`），按 SKILL.md 的模板拼执行命令并**脱离启动**（见坑 1），写 agent-live 文件。
-3. 轮询看到执行者 `.exit` → after 快照，比对卡片 `## Files`（越界就停、唤醒 Claude）→ 跑 `ledger.mjs <name>` →
-   按风险派审查（low 跳过；luna/sol 执行 → sol；否则 medium → luna、high → sol）。
-4. 看到审查 `.exit` → `$.prompt.submit` 一条摘要唤醒 Claude：VERDICT、`git diff --stat`、review 的 file:line、ledger 行。
+**进度**：卡片 `docs/orch/2026-10-05-run-card/card.md`（risk=medium，agy 执行，sol 审查）。
 
-**待定（开工前问用户）**
-- 风险和执行者：由 Claude 作为 `orch_run` 参数传，还是 runner 从卡片 `## Risk` 读。
-- 执行者失败（429、崩溃、非 0 退出）时：直接唤醒 Claude，还是先重试一次。
-- 修复轮（`## Fix N`）是否也走 runner。
-
-**API 事实（已核对 `token-weather-quotas/.claude-plugin/types/claude-code/index.d.ts`）**
-- `$.process.run`：一次性，默认 30 s，最长 10 min，读完整输出——不能用来跑执行者。
-- `$.process.spawn`：流式，**模块卸载（热重载）会杀掉子进程**。
-- `$.tool.register` 注册工具；`$.prompt.submit` 可提交一条消息唤醒 Claude（拒绝以 `/` 开头的文本）；
-  `$.clock.every` 定时轮询；`$.fs.read` 超 4 MiB 拒绝。
+**后续卡（2026-10-05 定，run-card 验收后按顺序写卡派发）**
+- 卡 2 · 跑之前/跑当中（改 `run-card.mjs`）：
+  1. 卡片 lint：派发前检查 Goal/Risk/Files/Check/Steps(N)/Don't 齐全、Files 和 Check 有反引号、Don't 含三句必带句，缺了直接退出，不启动执行者。
+  2. 审查首行没有 VERDICT → 自动重跑一次（SKILL.md 规则）。
+  3. 越界文件里把垃圾（`__pycache__`、`*.log`、`tmp*`）单独列出，方便 Claude 一句话问用户。
+  4. 只读数据目录守卫：`## Files` read-only 里的目录，before/after 比对文件列表 + 大小 + mtime，有任何变化就 fail。
+  5. `--recon` 模式：只读侦察卡，没有 Check，任何文件改动都算越界，完整打印回复（≤ 40 行）。
+- 卡 3 · 修复和验收（改 `run-card.mjs`）：
+  1. `--fix N`：agy 用 state 里存的 `--conversation`，codex 开新会话执行「## Fix N」；跑前先把旧的 ledger 行存进 state；
+     之后跑 Check 和越界检查，不再做一致性审查，摘要里直接附上修复的 diff；最多 2 轮。
+  2. 自动起草 `## Acceptance`（结论、文件、check、`tokens:`、审查结论），Claude 只需要填 `review findings`。
+  3. `--commit <name>`：只提交 `## Files` 里的文件 + card.md + review.md；项目有 `docs/review-log.md` 就追加一行。
+- 卡 4 · 独立小脚本：
+  1. `runner/run-long.mjs`：长计算启动器（输出目录已存在就停、tee 到 `run-<name>.jsonl`、写 `.exit`）。
+  2. 非 git 目录：snapshot 改成比对文件列表 + 大小 + mtime。
+  3. `runner/stats.mjs`：汇总 `orch-runner/*.json`，按执行者 × 风险统计结果、修复轮数、耗时、token，供攒够 10–15 张卡后调整 Modes 表。
+- 全部做完再改 SKILL.md 的 Flow / Commands，把 runner 写成默认派发方式。
 
 **坑**
-1. 执行者必须脱离 mod 进程启动：用 `$.process.run` 跑一条立即返回的启动命令（如 Git Bash `nohup … &` 或
-   PowerShell `Start-Process`），之后只靠读文件跟踪；否则改 mod 触发热重载会杀掉正在跑的 agy。
-2. 这台机器的 `python3` 是 Windows 商店占位程序，用 `python`。
-3. 认领要按会话持久化、`/clear` 会换 session id：照抄 token-weather 的 `syncSession` / `loadClaims` 做法。
-4. agy 的 `-p` 忽略 stdin；codex 必须 `< /dev/null`；agy 结果在 stream 最后一行 `"event":"result"`。
-
-**开工方式**：按 orchestrate 自己写卡（risk=medium，执行者 agy，审查 sol），卡片放 `docs/orch/<日期>-orch-runner/`。
+1. 这台机器的 `python3` 是 Windows 商店占位程序，用 `python`。
+2. agy 的 `-p` 忽略 stdin；codex 必须 `< /dev/null`；agy 结果在 stream 最后一行 `"event":"result"`。
+3. Bash 后台任务 2 h 被杀：runner 默认超时 100 min。
