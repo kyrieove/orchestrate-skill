@@ -1,11 +1,13 @@
 // Token use of one orchestrate task, for its ## Acceptance line.
-// Usage: node ledger.mjs <name>   (no name: every stream in agent-live)
+// Usage: node ledger.mjs <name> [--json]   (no name: every stream in agent-live)
 // Reads ~/.claude/agent-live/{agy,codex,codex-review}-<name>.jsonl; run it before the next same-name dispatch clears them.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 
-const dir = `${homedir()}/.claude/agent-live`;
-const name = process.argv[2];
+const dir = process.env.ORCH_RUNNER_LIVE_DIR || `${homedir()}/.claude/agent-live`;
+const isJson = process.argv.includes("--json");
+const args = process.argv.slice(2).filter((a) => a !== "--json");
+const name = args[0];
 // run-<name> streams are plain script output with no token use: only executor and review streams count.
 const files = (existsSync(dir) ? readdirSync(dir) : [])
   .filter((f) => /^(agy|codex-review|codex)-.+\.jsonl$/.test(f) && (!name || f.replace(/^(agy|codex-review|codex)-/, "") === `${name}.jsonl`))
@@ -16,22 +18,54 @@ if (!files.length) {
 }
 const k = (n) => `${Math.round(n / 1000)}k`;
 
+const results = [];
 for (const f of files) {
   let model = "", fresh = 0, cached = 0, out = 0;
+  let stepFresh = 0, stepCached = 0, stepOut = 0, hasStepUsage = false;
+  let resultFresh = 0, resultCached = 0, resultOut = 0;
   for (const line of readFileSync(`${dir}/${f}`, "utf8").split("\n")) {
     let e;
     try { e = JSON.parse(line); } catch { continue; }
     if (!e || typeof e !== "object") continue;
     model = e.init?.model ?? (typeof e.model === "string" ? e.model : model);
-    // codex: input_tokens includes the cached part; agy: input_tokens is fresh only.
-    if (e.type === "turn.completed" && e.usage) {
-      const u = e.usage;
-      fresh += (u.input_tokens ?? 0) - (u.cached_input_tokens ?? 0); cached += u.cached_input_tokens ?? 0; out += u.output_tokens ?? 0;
-    } else if (e.event === "result" && e.result?.usage) {
-      const u = e.result.usage;
-      fresh += u.input_tokens ?? 0; cached += u.cache_read_tokens ?? 0; out += u.output_tokens ?? 0;
+    if (f.startsWith("agy-")) {
+      const u = e.step_update?.usage ?? e.usage ?? e.step?.usage;
+      if (e.event === "step_update" && u) {
+        hasStepUsage = true;
+        stepFresh += u.input_tokens ?? 0;
+        stepCached += u.cache_read_tokens ?? 0;
+        stepOut += u.output_tokens ?? 0;
+      } else if (e.event === "result" && e.result?.usage) {
+        const ru = e.result.usage;
+        resultFresh += ru.input_tokens ?? 0;
+        resultCached += ru.cache_read_tokens ?? 0;
+        resultOut += ru.output_tokens ?? 0;
+      }
+    } else {
+      // codex: input_tokens includes the cached part; agy: input_tokens is fresh only.
+      if (e.type === "turn.completed" && e.usage) {
+        const u = e.usage;
+        fresh += (u.input_tokens ?? 0) - (u.cached_input_tokens ?? 0);
+        cached += u.cached_input_tokens ?? 0;
+        out += u.output_tokens ?? 0;
+      }
+    }
+  }
+  if (f.startsWith("agy-")) {
+    if (hasStepUsage) {
+      fresh = stepFresh; cached = stepCached; out = stepOut;
+    } else {
+      fresh = resultFresh; cached = resultCached; out = resultOut;
     }
   }
   const role = f.startsWith("codex-review-") ? "review" : "exec";
-  console.log(`${role} ${model || f.split("-")[0]}: fresh ${k(fresh)}, cached ${k(cached)}, out ${k(out)}  (${f})`);
+  const m = model || f.split("-")[0];
+  if (isJson) {
+    results.push({ role, model: m, fresh, cached, out, file: f });
+  } else {
+    console.log(`${role} ${m}: fresh ${k(fresh)}, cached ${k(cached)}, out ${k(out)}  (${f})`);
+  }
+}
+if (isJson) {
+  console.log(JSON.stringify(results));
 }

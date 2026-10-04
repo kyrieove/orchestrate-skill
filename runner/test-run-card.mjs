@@ -462,11 +462,156 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 12) {
-    console.log("12/12 passed");
+  // Case M (fix): case-A-like run (passes, risk low) → card gets ## Acceptance (draft); append ## Fix 1 to the card
+  // (commit nothing), run --fix 1 with fake exec echo y > b.txt; echo 'STATUS: done' → fix_passed,
+  // state.fixes.length === 1, the .fix1.diff file contains +y, and the card has exactly one
+  // ## Acceptance (draft) whose tokens part has a Fix 1 line.
+  {
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "low");
+    fs.writeFileSync(path.join(tempRepo, "a.txt"), "2", "utf8");
+    const envM1 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo x > b.txt; echo 'STATUS: done'"
+    };
+    delete envM1.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resM1 = spawnSync(process.execPath, [
+      runCardScript,
+      "--card", cardPath,
+      "--name", "case-m",
+      "--executor", "agy",
+      "--risk", "low",
+      "--repo", tempRepo
+    ], { env: envM1, encoding: "utf8" });
+
+    assert.strictEqual(resM1.status, 0, `Case M (round 1) exit status was ${resM1.status}: ${resM1.stderr}`);
+    const stateM1 = readState("case-m");
+    assert.strictEqual(stateM1.outcome, "passed_no_review");
+    const cardM1 = fs.readFileSync(cardPath, "utf8");
+    assert.ok(cardM1.includes("## Acceptance (draft)"), "Card should get ## Acceptance (draft)");
+
+    fs.appendFileSync(cardPath, "\n## Fix 1\n1. Fix step.\n", "utf8");
+
+    const envM2 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo y > b.txt; echo 'STATUS: done'"
+    };
+    delete envM2.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resM2 = spawnSync(process.execPath, [
+      runCardScript,
+      "--fix", "1",
+      "--card", cardPath,
+      "--name", "case-m",
+      "--repo", tempRepo
+    ], { env: envM2, encoding: "utf8" });
+
+    assert.strictEqual(resM2.status, 0, `Case M (fix 1) exit status was ${resM2.status}: ${resM2.stderr}`);
+    const stateM2 = readState("case-m");
+    assert.strictEqual(stateM2.outcome, "fix_passed");
+    assert.ok(stateM2.fixes && stateM2.fixes.length === 1, "state.fixes.length should be 1");
+
+    const diffFile = path.join(tempLive, "orch-runner", "case-m.fix1.diff");
+    assert.ok(fs.existsSync(diffFile), "diff file should exist");
+    const diffText = fs.readFileSync(diffFile, "utf8");
+    assert.ok(diffText.includes("+y"), "diff file should contain +y");
+
+    const cardM2 = fs.readFileSync(cardPath, "utf8");
+    const draftMatches = cardM2.match(/##\s+Acceptance\s+\(draft\)/g) || [];
+    assert.strictEqual(draftMatches.length, 1, "card should have exactly one ## Acceptance (draft)");
+    assert.ok(cardM2.includes("Fix 1:"), "tokens part should have a Fix 1 line");
+    passedCount++;
+  }
+
+  // Case N (fix guards): right after M, --fix 3 → exit 2; on a fresh name with no state file --fix 1 → exit 2.
+  {
+    const resN1 = spawnSync(process.execPath, [
+      runCardScript,
+      "--fix", "3",
+      "--card", cardPath,
+      "--name", "case-m",
+      "--repo", tempRepo
+    ], { env: baseEnv, encoding: "utf8" });
+    assert.strictEqual(resN1.status, 2, `Expected exit 2 for --fix 3, got ${resN1.status}`);
+
+    const resN2 = spawnSync(process.execPath, [
+      runCardScript,
+      "--fix", "1",
+      "--card", cardPath,
+      "--name", "non-existent-name",
+      "--repo", tempRepo
+    ], { env: baseEnv, encoding: "utf8" });
+    assert.strictEqual(resN2.status, 2, `Expected exit 2 for fresh name with no state file, got ${resN2.status}`);
+    passedCount++;
+  }
+
+  // Case O (commit): after M, --commit refuses (exit 2) while the draft heading is there; then replace the draft section
+  // by ## Acceptance + - verdict: accepted, create an unrelated untracked z.txt, run --commit --message t
+  // → exit 0 and git show --name-only --format= HEAD lists exactly a.txt, b.txt, docs/orch/t/card.md.
+  {
+    const resO1 = spawnSync(process.execPath, [
+      runCardScript,
+      "--commit",
+      "--name", "case-m",
+      "--message", "t"
+    ], { env: baseEnv, encoding: "utf8" });
+    assert.strictEqual(resO1.status, 2, `Expected exit 2 while draft heading is present, got ${resO1.status}`);
+
+    const cardContent = fs.readFileSync(cardPath, "utf8");
+    const withoutDraft = cardContent.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
+    fs.writeFileSync(cardPath, `${withoutDraft}\n\n## Acceptance\n- verdict: accepted\n`, "utf8");
+
+    fs.writeFileSync(path.join(tempRepo, "z.txt"), "unrelated untracked", "utf8");
+
+    const resO2 = spawnSync(process.execPath, [
+      runCardScript,
+      "--commit",
+      "--name", "case-m",
+      "--message", "t"
+    ], { env: baseEnv, encoding: "utf8" });
+    assert.strictEqual(resO2.status, 0, `Expected exit 0 for --commit, got ${resO2.status}: ${resO2.stderr}`);
+
+    const showRes = spawnSync("git", ["-C", tempRepo, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
+    assert.strictEqual(showRes.status, 0);
+    const committedFiles = showRes.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
+    assert.deepStrictEqual(committedFiles, ["a.txt", "b.txt", "docs/orch/t/card.md"]);
+    passedCount++;
+  }
+
+  // Case P (ledger): write agy-ledgertest.jsonl into the temp live dir with an init line, two step_update lines carrying
+  // usage {input_tokens: 100, cache_read_tokens: 1000, output_tokens: 10} each (same shape as the real stream), and a
+  // result line with cumulative usage {input_tokens: 999999, …}; node ledger.mjs ledgertest --json with
+  // ORCH_RUNNER_LIVE_DIR → fresh 200, cached 2000, out 20.
+  {
+    const ledgerFile = path.join(tempLive, "agy-ledgertest.jsonl");
+    const lines = [
+      JSON.stringify({ event: "init", init: { model: "gemini-3.8-flash-high" } }),
+      JSON.stringify({ event: "step_update", step_update: { usage: { input_tokens: 100, cache_read_tokens: 1000, output_tokens: 10 } } }),
+      JSON.stringify({ event: "step_update", step_update: { usage: { input_tokens: 100, cache_read_tokens: 1000, output_tokens: 10 } } }),
+      JSON.stringify({ event: "result", result: { usage: { input_tokens: 999999, cache_read_tokens: 999999, output_tokens: 999999 } } })
+    ];
+    fs.writeFileSync(ledgerFile, lines.join("\n") + "\n", "utf8");
+
+    const ledgerScript = path.resolve(__dirname, "../ledger.mjs");
+    const resP = spawnSync(process.execPath, [ledgerScript, "ledgertest", "--json"], {
+      env: baseEnv,
+      encoding: "utf8"
+    });
+    assert.strictEqual(resP.status, 0, `Expected exit 0 for ledger, got ${resP.status}: ${resP.stderr}`);
+    const parsed = JSON.parse(resP.stdout.trim());
+    assert.ok(Array.isArray(parsed) && parsed.length === 1, "ledger --json should return an array with 1 item");
+    assert.strictEqual(parsed[0].fresh, 200);
+    assert.strictEqual(parsed[0].cached, 2000);
+    assert.strictEqual(parsed[0].out, 20);
+    passedCount++;
+  }
+
+  if (passedCount === 16) {
+    console.log("16/16 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/12 passed`);
+    console.error(`Only ${passedCount}/16 passed`);
     process.exitCode = 1;
   }
 } finally {

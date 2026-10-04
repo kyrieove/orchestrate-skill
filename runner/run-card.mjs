@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
 
 function parseArgs(args) {
-  const booleanFlags = new Set(["recon"]);
+  const booleanFlags = new Set(["recon", "commit", "fresh"]);
   const parsed = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -123,34 +123,218 @@ function isJunkPath(repoRelPath) {
 const rawArgs = process.argv.slice(2);
 const args = parseArgs(rawArgs);
 
-const recon = args.recon === true;
-const card = args.card;
-const name = args.name;
-const executor = args.executor;
-const risk = args.risk;
-const repo = args.repo;
-const timeoutMinArg = args["timeout-min"];
+const liveDir = (process.env.ORCH_RUNNER_LIVE_DIR || path.posix.join(os.homedir().replaceAll("\\", "/"), ".claude/agent-live"));
+const normLiveDir = path.resolve(liveDir).replaceAll("\\", "/");
+const stateDir = path.posix.join(liveDir, "orch-runner");
+fs.mkdirSync(stateDir, { recursive: true });
 
-for (const req of ["card", "name", "executor", "risk", "repo"]) {
-  if (typeof args[req] !== "string" || args[req].trim() === "") {
-    console.error(`Argument --${req} must be a non-empty string`);
+if (args.commit) {
+  const name = args.name;
+  const message = args.message;
+  if (typeof name !== "string" || !/^[\w.-]+$/.test(name)) {
+    console.error("Argument --name required for commit (letters, digits, _ . - only)");
     process.exit(2);
   }
+  if (!message || typeof message !== "string") {
+    console.error("Argument --message required for commit");
+    process.exit(2);
+  }
+  const stateFile = path.posix.join(stateDir, `${name}.json`);
+  if (!fs.existsSync(stateFile)) {
+    console.error("No state file found:", stateFile);
+    process.exit(2);
+  }
+  let state;
+  try {
+    state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  } catch (err) {
+    console.error("Failed to parse state file:", err);
+    process.exit(2);
+  }
+  const repoAbs = state.repo;
+  const cardAbs = state.card;
+  if (!cardAbs || !fs.existsSync(cardAbs)) {
+    console.error("Card file not found:", cardAbs);
+    process.exit(2);
+  }
+  const cardText = fs.readFileSync(cardAbs, "utf8");
+
+  if (/^##\s+Acceptance\s+\(draft\)\s*$/im.test(cardText)) {
+    console.error("Card still contains ## Acceptance (draft)");
+    process.exit(2);
+  }
+
+  function getSectionNoDraft(text, title) {
+    const lines = text.split(/\r?\n/);
+    let inSection = false;
+    const sectionLines = [];
+    for (const line of lines) {
+      if (/^##\s+/.test(line)) {
+        if (inSection) break;
+        if (/^##\s+Acceptance\s+\(draft\)\s*$/i.test(line.trim())) continue;
+        const secTitle = line.replace(/^##\s+/, "").trim().split(/\s+/)[0];
+        if (secTitle.toLowerCase() === title.toLowerCase()) {
+          inSection = true;
+          continue;
+        }
+      }
+      if (inSection) {
+        sectionLines.push(line);
+      }
+    }
+    return inSection ? sectionLines.join("\n") : null;
+  }
+
+  const acceptanceSection = getSectionNoDraft(cardText, "Acceptance");
+  if (acceptanceSection === null) {
+    console.error("There is no ## Acceptance section in card");
+    process.exit(2);
+  }
+  if (/\bTODO\b/.test(acceptanceSection)) {
+    console.error("TODO found in ## Acceptance section");
+    process.exit(2);
+  }
+
+  const allTouched = state.allTouched || (state.rounds ? state.rounds.flatMap((r) => r.touched || []) : state.touched) || [];
+  const mayChange = state.mayChange || [];
+  const stagedTouched = allTouched.filter((p) =>
+    mayChange.some((entry) => entry.endsWith("/") ? p.startsWith(entry) : p === entry)
+  );
+
+  const cardDirNorm = path.resolve(path.dirname(cardAbs)).replaceAll("\\", "/");
+  let taskDir = path.posix.relative(repoAbs, cardDirNorm);
+  if (taskDir === "") taskDir = ".";
+  const cardRel = taskDir === "." ? "card.md" : `${taskDir}/card.md`;
+  const reviewRel = taskDir === "." ? "review.md" : `${taskDir}/review.md`;
+
+  const filesToStage = new Set(stagedTouched);
+  filesToStage.add(cardRel);
+  if (fs.existsSync(path.resolve(repoAbs, reviewRel))) {
+    filesToStage.add(reviewRel);
+  }
+
+  const reviewLogRel = "docs/review-log.md";
+  const reviewLogAbs = path.resolve(repoAbs, reviewLogRel);
+  if (fs.existsSync(reviewLogAbs)) {
+    const yyyymmdd = new Date().toISOString().slice(0, 10);
+    const goalSec = getSection(cardText, "Goal") || "";
+    const goalFirstLine = goalSec.trim().split(/\r?\n/)[0]?.trim() || "";
+    const logLine = `- ${yyyymmdd} ${state.name}: ${goalFirstLine} (${cardRel})\n`;
+    fs.appendFileSync(reviewLogAbs, logLine, "utf8");
+    filesToStage.add(reviewLogRel);
+  }
+
+  const fileList = Array.from(filesToStage).sort();
+  const addRes = spawnSync("git", ["-C", repoAbs, "add", "--", ...fileList], { encoding: "utf8" });
+  if (addRes.status !== 0) {
+    console.error("git add failed:", addRes.stderr);
+    process.exit(1);
+  }
+  const commitRes = spawnSync("git", ["-C", repoAbs, "commit", "-m", message, "--", ...fileList], { encoding: "utf8" });
+  if (commitRes.status !== 0) {
+    console.error("git commit failed:", commitRes.stderr);
+    process.exit(1);
+  }
+  const revRes = spawnSync("git", ["-C", repoAbs, "rev-parse", "--short", "HEAD"], { encoding: "utf8" });
+  if (revRes.status !== 0) {
+    console.error("git rev-parse failed:", revRes.stderr);
+    process.exit(1);
+  }
+  const shortHead = revRes.stdout.trim();
+  console.log(shortHead);
+  state.commit = shortHead;
+  const tmp = `${stateFile}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
+  fs.renameSync(tmp, stateFile);
+  process.exit(0);
 }
 
-if (!/^[\w.-]+$/.test(name)) {
-  console.error("Invalid name argument");
-  process.exit(2);
-}
+const isFix = args.fix !== undefined;
+const recon = !isFix && args.recon === true;
+let card = args.card;
+let name = args.name;
+let executor = args.executor;
+let risk = args.risk;
+let repo = args.repo;
+const timeoutMinArg = args["timeout-min"];
 
-if (!["agy", "luna", "sol"].includes(executor)) {
-  console.error("Invalid executor:", executor);
-  process.exit(2);
-}
+let existingState = null;
+let fixRoundN = null;
 
-if (!["low", "medium", "high"].includes(risk)) {
-  console.error("Invalid risk:", risk);
-  process.exit(2);
+if (isFix) {
+  for (const req of ["card", "name", "repo"]) {
+    if (typeof args[req] !== "string" || args[req].trim() === "") {
+      console.error(`Argument --${req} must be a non-empty string`);
+      process.exit(2);
+    }
+  }
+  if (!/^[\w.-]+$/.test(name)) {
+    console.error("Invalid name argument");
+    process.exit(2);
+  }
+  const stateFile = path.posix.join(stateDir, `${name}.json`);
+  if (!fs.existsSync(stateFile)) {
+    console.error("State file does not exist:", stateFile);
+    process.exit(2);
+  }
+  try {
+    existingState = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  } catch {
+    console.error("Failed to parse state file:", stateFile);
+    process.exit(2);
+  }
+
+  const fixStr = String(args.fix).trim();
+  if (!/^\d+$/.test(fixStr)) {
+    console.error("Fix round N must be an integer:", args.fix);
+    process.exit(2);
+  }
+  fixRoundN = parseInt(fixStr, 10);
+  const recordedFixes = existingState.fixes?.length ?? 0;
+  if (fixRoundN !== recordedFixes + 1 || fixRoundN > 2) {
+    console.error(`Invalid fix round N=${fixRoundN} (recorded fixes: ${recordedFixes})`);
+    process.exit(2);
+  }
+
+  if (executor !== undefined) {
+    if (executor !== existingState.executor) {
+      console.error(`--executor '${executor}' does not match state '${existingState.executor}'`);
+      process.exit(2);
+    }
+  } else {
+    executor = existingState.executor;
+  }
+
+  if (risk !== undefined) {
+    if (risk !== existingState.risk) {
+      console.error(`--risk '${risk}' does not match state '${existingState.risk}'`);
+      process.exit(2);
+    }
+  } else {
+    risk = existingState.risk;
+  }
+} else if (!args.commit) {
+  for (const req of ["card", "name", "executor", "risk", "repo"]) {
+    if (typeof args[req] !== "string" || args[req].trim() === "") {
+      console.error(`Argument --${req} must be a non-empty string`);
+      process.exit(2);
+    }
+  }
+
+  if (!/^[\w.-]+$/.test(name)) {
+    console.error("Invalid name argument");
+    process.exit(2);
+  }
+
+  if (!["agy", "luna", "sol"].includes(executor)) {
+    console.error("Invalid executor:", executor);
+    process.exit(2);
+  }
+
+  if (!["low", "medium", "high"].includes(risk)) {
+    console.error("Invalid risk:", risk);
+    process.exit(2);
+  }
 }
 
 let timeoutMin = 100;
@@ -162,29 +346,43 @@ if (timeoutMinArg !== undefined) {
   }
 }
 
-const cardAbs = path.resolve(card).replaceAll("\\", "/");
-if (!fs.existsSync(cardAbs)) {
+const cardAbs = card ? path.resolve(card).replaceAll("\\", "/") : "";
+if (!isFix && !args.commit && !cardAbs) {
+  console.error("Card argument missing");
+  process.exit(2);
+}
+if (cardAbs && !fs.existsSync(cardAbs)) {
   console.error("Card file does not exist:", cardAbs);
   process.exit(2);
 }
 
-const repoAbs = path.resolve(repo).replaceAll("\\", "/");
-const gitCheck = spawnSync("git", ["-C", repoAbs, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
-if (gitCheck.status !== 0 || gitCheck.stdout.trim() !== "true") {
-  console.error("Repo is not inside git work tree:", repoAbs);
-  process.exit(2);
+const repoAbs = repo ? path.resolve(repo).replaceAll("\\", "/") : "";
+if (repoAbs) {
+  const gitCheck = spawnSync("git", ["-C", repoAbs, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
+  if (gitCheck.status !== 0 || gitCheck.stdout.trim() !== "true") {
+    console.error("Repo is not inside git work tree:", repoAbs);
+    process.exit(2);
+  }
 }
 
-const cardBytes = fs.readFileSync(cardAbs);
+const cardBytes = cardAbs ? fs.readFileSync(cardAbs) : Buffer.from("");
 const cardText = cardBytes.toString("utf8");
 const cardSha = crypto.createHash("sha256").update(cardBytes).digest("hex");
 
-const lintProblems = lintCard(cardText);
-if (lintProblems.length > 0) {
-  for (const prob of lintProblems) {
-    console.error(`lint: ${prob}`);
+if (isFix) {
+  const hasFixHeading = cardText.split(/\r?\n/).some((l) => l.trim() === `## Fix ${fixRoundN}`);
+  if (!hasFixHeading) {
+    console.error(`The card has no line exactly '## Fix ${fixRoundN}'`);
+    process.exit(2);
   }
-  process.exit(2);
+} else if (!args.commit) {
+  const lintProblems = lintCard(cardText);
+  if (lintProblems.length > 0) {
+    for (const prob of lintProblems) {
+      console.error(`lint: ${prob}`);
+    }
+    process.exit(2);
+  }
 }
 
 const checkSection = getSection(cardText, "Check");
@@ -227,8 +425,6 @@ const exemptPaths = new Set([
   taskDir === "." ? "review.md" : `${taskDir}/review.md`
 ]);
 
-const liveDir = (process.env.ORCH_RUNNER_LIVE_DIR || path.posix.join(os.homedir().replaceAll("\\", "/"), ".claude/agent-live"));
-const normLiveDir = path.resolve(liveDir).replaceAll("\\", "/");
 
 const readOnlyRaw = [];
 if (readOnlyIdx >= 0) {
@@ -258,7 +454,6 @@ for (const p of readOnlyRaw) {
 }
 
 // 2. State file
-const stateDir = path.posix.join(liveDir, "orch-runner");
 fs.mkdirSync(stateDir, { recursive: true });
 
 const stateFile = path.posix.join(stateDir, `${name}.json`);
@@ -270,33 +465,80 @@ function save(st) {
   fs.renameSync(tmp, stateFile);
 }
 
-const state = {
-  name,
-  recon,
-  card: cardAbs,
-  cardSha,
-  executor,
-  risk,
-  repo: repoAbs,
-  check,
-  mayChange,
-  startedAt: new Date().toISOString(),
-  stage: "executing",
-  outcome: null,
-  before: null,
-  after: null,
-  readOnlyBefore: null,
-  readOnlyChanged: null,
-  touched: null,
-  outOfScope: null,
-  junk: null,
-  exec: { exit: null, status: null, seconds: null, reply: null },
-  checkResult: { exit: null, log: null },
-  review: { model: null, verdict: null },
-  ledger: null,
-  cardModified: false
-};
-save(state);
+let state;
+let basePaths = [];
+let baseDir = null;
+
+if (isFix) {
+  state = existingState;
+  if (!state.rounds) state.rounds = [];
+  if (state.rounds.length === 0) {
+    state.rounds.push({ round: "1", ledger: state.ledger, touched: state.touched });
+  }
+  if (!state.fixes) state.fixes = [];
+  state.stage = "executing";
+  state.outcome = null;
+  state.readOnlyChanged = null;
+  state.outOfScope = null;
+  state.junk = null;
+  state.exec = { exit: null, status: null, seconds: null, reply: null };
+  state.checkResult = { exit: null, log: null };
+  save(state);
+
+  baseDir = path.posix.join(stateDir, `${name}.fix${fixRoundN}.base`);
+  fs.mkdirSync(baseDir, { recursive: true });
+  const basePathsSet = new Set();
+  for (const p of mayChange) {
+    const absP = path.resolve(repoAbs, p);
+    if (fs.existsSync(absP) && fs.statSync(absP).isFile()) {
+      basePathsSet.add(p);
+    }
+  }
+  for (const p of (state.touched || [])) {
+    basePathsSet.add(p);
+  }
+  basePaths = Array.from(basePathsSet).sort();
+  for (const p of basePaths) {
+    const src = path.resolve(repoAbs, p);
+    const dest = path.resolve(baseDir, p);
+    if (fs.existsSync(src) && fs.statSync(src).isFile()) {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      fs.copyFileSync(src, dest);
+    }
+  }
+} else {
+  state = {
+    name,
+    recon,
+    card: cardAbs,
+    cardSha,
+    executor,
+    risk,
+    repo: repoAbs,
+    check,
+    mayChange,
+    startedAt: new Date().toISOString(),
+    stage: "executing",
+    outcome: null,
+    before: null,
+    after: null,
+    readOnlyBefore: null,
+    readOnlyChanged: null,
+    touched: null,
+    outOfScope: null,
+    junk: null,
+    exec: { exit: null, status: null, seconds: null, reply: null },
+    checkResult: { exit: null, log: null },
+    review: { model: null, verdict: null },
+    ledger: null,
+    conversationId: null,
+    cardModified: false,
+    rounds: [],
+    fixes: [],
+    allTouched: []
+  };
+  save(state);
+}
 
 // 3. Snapshot
 function snapshot() {
@@ -427,9 +669,15 @@ state.before = snapshot();
 state.readOnlyBefore = statTree(readOnlyPaths);
 save(state);
 
-for (const prefix of ["agy", "codex", "codex-review"]) {
-  for (const ext of ["jsonl", "progress", "exit"]) {
-    fs.rmSync(path.posix.join(liveDir, `${prefix}-${name}.${ext}`), { force: true });
+if (isFix) {
+  const execPrefix = (executor === "agy" || process.env.ORCH_RUNNER_FAKE_EXEC) ? "agy" : "codex";
+  fs.rmSync(path.posix.join(liveDir, `${execPrefix}-${name}.progress`), { force: true });
+  fs.rmSync(path.posix.join(liveDir, `${execPrefix}-${name}.exit`), { force: true });
+} else {
+  for (const prefix of ["agy", "codex", "codex-review"]) {
+    for (const ext of ["jsonl", "progress", "exit"]) {
+      fs.rmSync(path.posix.join(liveDir, `${prefix}-${name}.${ext}`), { force: true });
+    }
   }
 }
 
@@ -486,9 +734,14 @@ function runBash(cmd, { cwd, timeoutMin, exitPath }) {
 // 4. Executor
 const progressPrefix = (executor === "agy" || process.env.ORCH_RUNNER_FAKE_EXEC) ? "agy" : "codex";
 const progressLine = `after starting, append \`0/N 已完成：无 · 正在：<第1步>\`, and after finishing each step append \`k/N 已完成：X · 正在：Y\` (Chinese; Y names the file / function and the action, 15–30 characters, e.g. \`2/5 已完成：读 README · 正在：在 README 的 Demo 前插入 Quota row 一节\`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to ${liveDir}/${progressPrefix}-${name}.progress. Just append; do not open, list or inspect that directory or any other file to learn the format.`;
-const execPrompt = recon
-  ? `Read ${cardAbs} and answer what it asks. This is read-only: do not create, modify or delete any file; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then the answer. ${progressLine}`
-  : `Read ${cardAbs} and carry out every step exactly; run only the commands the Steps name; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. ${progressLine}`;
+let execPrompt;
+if (isFix) {
+  execPrompt = `Read ${cardAbs} and carry out ## Fix ${fixRoundN} exactly; run only the commands it names; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. ${progressLine}`;
+} else if (recon) {
+  execPrompt = `Read ${cardAbs} and answer what it asks. This is read-only: do not create, modify or delete any file; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then the answer. ${progressLine}`;
+} else {
+  execPrompt = `Read ${cardAbs} and carry out every step exactly; run only the commands the Steps name; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. ${progressLine}`;
+}
 
 let S;
 if (process.env.ORCH_RUNNER_FAKE_EXEC || executor === "agy") {
@@ -502,7 +755,8 @@ let execCmd;
 if (process.env.ORCH_RUNNER_FAKE_EXEC) {
   execCmd = `{\n${process.env.ORCH_RUNNER_FAKE_EXEC}\n} > ${q(S)} 2>&1`;
 } else if (executor === "agy") {
-  execCmd = `C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p ${q(execPrompt)} --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format stream-json > ${q(S)} 2>&1`;
+  const convArg = (state.conversationId && !args.fresh) ? ` --conversation ${state.conversationId}` : "";
+  execCmd = `C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p ${q(execPrompt)} --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format stream-json${convArg} > ${q(S)} 2>&1`;
 } else {
   const model = executor === "luna" ? "gpt-6-luna" : "gpt-6.1-sol";
   execCmd = `{ echo '{"model":"${model}"}'; codex exec --approve-for-me -m ${model} -C ${q(repoAbs)} --json ${q(execPrompt)} < /dev/null; } > ${q(S)} 2>&1`;
@@ -520,11 +774,13 @@ if (execResult.timedOut) {
     const content = fs.readFileSync(S, "utf8");
     if (executor === "agy") {
       const lines = content.trim().split(/\r?\n/).filter(Boolean);
-      if (lines.length > 0) {
+      for (let i = lines.length - 1; i >= 0; i--) {
         try {
-          const lastObj = JSON.parse(lines[lines.length - 1]);
-          if (lastObj.event === "result") {
-            reply = lastObj.result?.response ?? (typeof lastObj.result === "string" ? lastObj.result : JSON.stringify(lastObj.result));
+          const obj = JSON.parse(lines[i]);
+          if (obj.event === "result") {
+            reply = obj.result?.response ?? (typeof obj.result === "string" ? obj.result : JSON.stringify(obj.result));
+            state.conversationId = obj.result?.conversation_id ?? null;
+            break;
           }
         } catch {}
       }
@@ -666,7 +922,10 @@ if (!state.outcome) {
 
 // 7. Review
 if (!state.outcome) {
-  if (risk === "low") {
+  if (isFix) {
+    state.outcome = "fix_passed";
+    save(state);
+  } else if (risk === "low") {
     state.outcome = "passed_no_review";
     save(state);
   } else {
@@ -757,18 +1016,132 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ledgerScript = path.resolve(__dirname, "../ledger.mjs");
 try {
-  const ledgerRes = spawnSync(process.execPath, [ledgerScript, name], { encoding: "utf8" });
+  const ledgerRes = spawnSync(process.execPath, [ledgerScript, name, "--json"], {
+    encoding: "utf8",
+    env: { ...process.env, ORCH_RUNNER_LIVE_DIR: liveDir }
+  });
   if (ledgerRes.status === 0 && ledgerRes.stdout.trim()) {
-    state.ledger = ledgerRes.stdout.trim();
+    state.ledger = JSON.parse(ledgerRes.stdout.trim());
   } else {
-    state.ledger = "n/a";
+    state.ledger = [];
   }
 } catch {
-  state.ledger = "n/a";
+  state.ledger = [];
+}
+let fixDiffContent = "";
+let fixDiffFile = null;
+if (isFix) {
+  const diffPathsSet = new Set(basePaths);
+  for (const p of (state.touched || [])) {
+    diffPathsSet.add(p);
+  }
+  const diffPaths = Array.from(diffPathsSet).sort();
+  const diffPieces = [];
+  for (const p of diffPaths) {
+    const baseCopy = path.resolve(baseDir, p).replaceAll("\\", "/");
+    const repoFile = path.resolve(repoAbs, p).replaceAll("\\", "/");
+    const baseExists = fs.existsSync(baseCopy) && fs.statSync(baseCopy).isFile();
+    const repoExists = fs.existsSync(repoFile) && fs.statSync(repoFile).isFile();
+    if (!baseExists && !repoExists) continue;
+    const arg1 = baseExists ? baseCopy : "/dev/null";
+    const arg2 = repoExists ? repoFile : "/dev/null";
+    const dRes = spawnSync("git", ["diff", "--no-index", "--", arg1, arg2], {
+      encoding: "utf8",
+      maxBuffer: 50 * 1024 * 1024
+    });
+    if (dRes.stdout) {
+      diffPieces.push(dRes.stdout);
+    }
+  }
+  fixDiffContent = diffPieces.join("");
+  fixDiffFile = path.posix.join(stateDir, `${name}.fix${fixRoundN}.diff`);
+  fs.writeFileSync(fixDiffFile, fixDiffContent, "utf8");
+
+  state.rounds.push({
+    round: `Fix ${fixRoundN}`,
+    ledger: state.ledger,
+    outcome: state.outcome,
+    fresh: Boolean(args.fresh),
+    touched: state.touched
+  });
+  state.fixes.push({
+    n: fixRoundN,
+    outcome: state.outcome
+  });
+  state.allTouched = Array.from(new Set(state.rounds.flatMap((r) => r.touched || []))).sort();
+} else {
+  state.allTouched = state.touched || [];
+}
+
+const k = (n) => `${Math.round(n / 1000)}k`;
+function formatLedgerLines(ledger) {
+  if (!Array.isArray(ledger) || ledger.length === 0) return "n/a";
+  return ledger
+    .map((item) => `${item.role} ${item.model}: fresh ${k(item.fresh)}, cached ${k(item.cached)}, out ${k(item.out)}  (${item.file})`)
+    .join("\n");
 }
 
 state.stage = "done";
 save(state);
+
+// 5. Acceptance draft
+const draftOutcomes = new Set(["review_pass", "passed_no_review", "fix_passed", "recon_done"]);
+if (draftOutcomes.has(state.outcome)) {
+  const currentCardText = fs.readFileSync(cardAbs, "utf8");
+  const cLines = currentCardText.split(/\r?\n/);
+  const keptLines = [];
+  let inDraft = false;
+  for (const line of cLines) {
+    if (/^##\s+Acceptance\s+\(draft\)\s*$/i.test(line.trim())) {
+      inDraft = true;
+      continue;
+    }
+    if (inDraft) {
+      if (/^##\s+/.test(line)) {
+        inDraft = false;
+        keptLines.push(line);
+      }
+      continue;
+    }
+    keptLines.push(line);
+  }
+  const cleanCardText = keptLines.join("\n").trimEnd();
+
+  function formatLedgerRow(ledger) {
+    if (!ledger || !ledger.length) return "n/a";
+    return ledger
+      .map((item) => `${item.role} ${item.model}: fresh ${k(item.fresh)}, cached ${k(item.cached)}, out ${k(item.out)}  (${item.file})`)
+      .join(" · ");
+  }
+
+  const allTouched = state.allTouched || (state.rounds ? state.rounds.flatMap((r) => r.touched || []) : state.touched) || [];
+  const allTouchedList = allTouched.length > 0 ? allTouched.join(", ") : "-";
+  const checkExitVal = state.checkResult?.exit !== null && state.checkResult?.exit !== undefined ? state.checkResult.exit : 0;
+  const checkLine = check ? `- check: \`${check}\` → exit ${checkExitVal} (run by run-card)` : "- check: -";
+
+  const tokenLines = [];
+  if (state.rounds && state.rounds.length > 0) {
+    for (const r of state.rounds) {
+      const roundLabel = (r.round === "1" || r.round === "round 1") ? "round 1" : r.round;
+      tokenLines.push(`  - ${roundLabel}: ${formatLedgerRow(r.ledger)}`);
+    }
+  } else {
+    tokenLines.push(`  - round 1: ${formatLedgerRow(state.ledger)}`);
+  }
+
+  const reviewerStr = state.review?.model || "no review";
+  const draftSection = [
+    "## Acceptance (draft)",
+    "- verdict: TODO (accepted / review pending / rejected)",
+    `- files: ${allTouchedList}`,
+    checkLine,
+    "- tokens:",
+    ...tokenLines,
+    `- review findings: TODO N real / M false positive / K missed (${risk}, ${reviewerStr})`
+  ].join("\n");
+
+  fs.writeFileSync(cardAbs, `${cleanCardText}\n\n${draftSection}\n`, "utf8");
+}
 
 // Print summary (<= ~45 lines, nothing else on stdout)
 const lines = [];
@@ -818,18 +1191,32 @@ if (state.review?.model) {
   lines.push(`review: skipped -`);
 }
 
-const diffRes = spawnSync("git", ["-C", repoAbs, "diff", "--stat"], { encoding: "utf8" });
-let diffLast = "-";
-if (diffRes.stdout) {
-  const dLines = diffRes.stdout.trim().split(/\r?\n/).filter(Boolean);
-  if (dLines.length > 0) {
-    diffLast = dLines[dLines.length - 1].trim();
+if (isFix && fixDiffFile) {
+  lines.push("fix diff:");
+  const diffLines = fixDiffContent ? fixDiffContent.split(/\r?\n/) : [];
+  if (diffLines.length > 0 && diffLines[diffLines.length - 1] === "") diffLines.pop();
+  if (diffLines.length > 150) {
+    lines.push(diffLines.slice(0, 150).join("\n"));
+    lines.push(`(truncated, full diff: ${fixDiffFile})`);
+  } else if (diffLines.length > 0) {
+    lines.push(diffLines.join("\n"));
+  } else {
+    lines.push("-");
   }
+} else {
+  const diffRes = spawnSync("git", ["-C", repoAbs, "diff", "--stat"], { encoding: "utf8" });
+  let diffLast = "-";
+  if (diffRes.stdout) {
+    const dLines = diffRes.stdout.trim().split(/\r?\n/).filter(Boolean);
+    if (dLines.length > 0) {
+      diffLast = dLines[dLines.length - 1].trim();
+    }
+  }
+  lines.push(`diff: ${diffLast}`);
 }
-lines.push(`diff: ${diffLast}`);
 
 lines.push(`tokens:`);
-lines.push(state.ledger ?? "n/a");
+lines.push(formatLedgerLines(state.ledger));
 
 lines.push(`reply:`);
 const replyLines = (state.exec?.reply ?? "").split(/\r?\n/);
