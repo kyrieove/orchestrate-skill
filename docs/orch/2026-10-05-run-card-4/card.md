@@ -85,3 +85,4 @@ Don't install packages. Don't run real agy/codex executors from the test.
 - check: `node runner/test-run-card.mjs` → 19/19 passed after the fixes
 - tokens: exec gemini-3.8-flash-high: fresh 667k, cached 6509k, out 71k · review gpt-6-luna: fresh 37k, cached 102k, out 2k
 - review findings: 1 real / 0 false positive / 1 missed (stats averaging, found by Claude on real data) (medium, gpt-6-luna)
+- K missed backfill (retro 2026-10-05): 2 (found after acceptance): codex executor lacked --skip-git-repo-check outside git; run-long read the whole log for its tail — /rv sol, fixed 834eeee

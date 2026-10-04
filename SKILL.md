@@ -54,6 +54,10 @@ Three layers:
    medium risk → `gpt-6-luna`, high risk → `gpt-6.1-sol` (checking a diff against a card needs no top model; 2026-10-04
    user decision to spare sol quota). When luna executed, sol reviews at medium and high; when sol executed, a *fresh*
    `gpt-6.1-sol` session.
+   Code that later runs depend on (shared tooling, the runner, common modules) takes the high-tier reviewer (sol) even at
+   medium risk: on the runner (2026-10-05) luna found 0–1 issues per card, sol 5, and later audits 11 more.
+   **Audit**: after 4–5 accepted cards on the same module, run a read-only whole-repo sol audit (`/rv` 整体) and backfill
+   each real finding into the K missed of the card that introduced it — a diff review never sees cross-card design bugs.
 3. **Acceptance** — Claude only. Reads `review.md`, `git diff --stat`, the flagged hunks (`file:line`
    from the review) and the product (open the figure, run the CLI, read the numbers). Not the full diff.
 
@@ -98,7 +102,7 @@ conformance review catches a wrong number; only an independent recompute does.
    **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
    run in the background with `node ~/.claude/skills/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`
    (refuses an existing output dir unless `--resume`; default timeout 110 min; split longer runs into resumable parts;
-   a waiting executor re-reads its context on every poll — agy on v16, 2026-10-04: 7.6 M fresh + 22 M cached).
+   a waiting executor re-reads its context on every poll — agy on v16, 2026-10-04: ~6.4 M fresh + 17.7 M cached in its first run).
 4. **Read the summary** (its first line is `ORCH-RUNNER <name> outcome=<outcome>`):
 
    | outcome | next |
@@ -182,7 +186,7 @@ Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
    user — the executor must not overwrite them.
 4. **Execute** (background, no heartbeat; commands below). **Long runs (> 10 min of computing):** the executor
    writes the script and runs the pilot only; Claude starts the full run as a background Bash job (0 tokens while it
-   computes; a waiting executor re-reads its context on every poll — agy on v16, 2026-10-04: 7.6 M fresh + 22 M cached).
+   computes; a waiting executor re-reads its context on every poll — agy on v16, 2026-10-04: ~6.4 M fresh + 17.7 M cached in its first run).
    Command (literal paths, so the lane `脚本 <name>` shows; the `.exit` file turns it done/failed):
    `python <script> 2>&1 | tee ~/.claude/agent-live/run-<name>.jsonl; echo ${PIPESTATUS[0]} > ~/.claude/agent-live/run-<name>.exit`
    — the script appends `k/N 已完成：… · 正在：…` to `~/.claude/agent-live/run-<name>.progress` after each checkpoint.

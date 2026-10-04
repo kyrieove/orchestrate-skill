@@ -22,7 +22,9 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
   比内容（`git status` 看不出二次修改）；每张卡一个状态文件 `~/.claude/agent-live/orch-runner/<name>.json`；时间上限。4 已有（300k 换会话），5 以后。
 - SKILL.md 保留手动派发模板作后备；runner 验证通过后再改 SKILL.md 的 Flow / Commands。
 
-**进度**：runner 完成（卡 1–5，最后 2177aee），SKILL.md 默认走 runner（43d3f1c / fe844f1），sol /rv 与整仓 audit 已修。剩余：run-card.mjs 约 1280 行偏胖，需要时做一次重写瘦身；`--fresh` 与续会话修复的 token 对比尚未实测。
+**进度**：runner 完成（卡 1–5，2177aee），SKILL.md 默认走 runner；retro（2026-10-05）已落地：共享工具代码用 sol 审、同模块 4–5 张卡后跑 sol 整仓 audit 并回填 K missed、v16 数字改为按轮、本地 pre-commit 钩子（`.git/hooks/pre-commit`，未入库：node --check + 测试）。
+
+**下一步（新会话）**：卡 6 —— 把 `runner/run-card.mjs`（~1280 行）按阶段拆成模块（lint / snapshot+scope / executor / review / acceptance+commit），每张卡只碰小文件；依据：agy 缓存读取随文件变大从 1.8M 涨到 9.3M/卡。共享工具 → 审查用 sol。顺带实测 `--fresh` 与续会话修复的 token。
 
 **后续卡（2026-10-05 定，run-card 验收后按顺序写卡派发）**
 - 卡 2 · 跑之前/跑当中（改 `run-card.mjs`）：

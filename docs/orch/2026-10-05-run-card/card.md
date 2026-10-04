@@ -157,3 +157,4 @@ Run the Check in the foreground and wait for it to finish before replying.
   - round 1: exec gemini-3.8-flash-high: fresh 549k, cached 1801k, out 63k · review gpt-6.1-sol: fresh 30k, cached 106k, out 1k
   - Fix 1 (agy stream is cumulative over the conversation; Fix 1 alone ≈ fresh 266k, cached 3058k, out 14k): exec gemini-3.8-flash-high: fresh 815k, cached 4859k, out 77k
 - review findings: 5 real / 0 false positive / 0 missed (medium, gpt-6.1-sol)
+- K missed backfill (retro 2026-10-05): 3 (found after acceptance): worktree rename ( R) not parsed — /rv sol, fixed 834eeee; Check output never scope-checked — audit sol, fixed 2177aee; per-stage timeouts exceed the 2 h Bash limit — audit sol, fixed 2177aee
