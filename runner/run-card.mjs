@@ -247,7 +247,8 @@ let existingState = null;
 let fixRoundN = null;
 
 if (isFix) {
-  for (const req of ["card", "name", "repo"]) {
+  // card and repo default to the state file's (checked against it below when given).
+  for (const req of ["name"]) {
     if (typeof args[req] !== "string" || args[req].trim() === "") {
       console.error(`Argument --${req} must be a non-empty string`);
       process.exit(2);

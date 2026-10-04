@@ -103,15 +103,16 @@ conformance review catches a wrong number; only an independent recompute does.
 
    | outcome | next |
    |---|---|
-   | `review_pass`, `passed_no_review`, `recon_done` | step 6 (low risk: also glance at `diff --stat`) |
+   | `review_pass`, `passed_no_review`, `recon_done`, `fix_passed` | step 6 (low risk: also glance at `diff --stat`) |
    | `review_fail` | check each finding at its `file:line`, then step 5 |
    | `check_failed` | the summary has the Check's tail; step 5 |
    | `out_of_scope` | 🛑 show the files, the user decides (never auto-revert); `junk:` paths are deleted only after the user says so in one line |
    | `readonly_violated` | 🛑 show the changed read-only paths to the user |
    | `blocked`, `failed`, `interrupted` | read the reply / stream tail; executor failures follow **Executor fails** above |
-   | `review_error` | reviewer exited non-zero (quota?) or gave no VERDICT twice: **Reviewer out of quota** above |
+   | `review_error` | read the tail of `codex-review-<name>.jsonl`: quota / rate-limit text → **Reviewer out of quota** above; anything else (bad config, no VERDICT twice) → fix the cause and re-run the review — no provisional acceptance |
 5. **Fix.** A real finding whose fix is a few mechanical lines (a missing check, a wrong regex, a duplicate
-   declaration): Claude fixes it directly, re-runs the Check, and says so in Acceptance — an executor fix round costs
+   declaration): Claude fixes it directly — except in fixed modes or when the user asked Claude not to implement
+   (same rule as **Who writes**) — re-runs the Check, and says so in Acceptance — an executor fix round costs
    ~0.3 M fresh + 3 M cached tokens (2026-10-05). Anything larger: append `## Fix N` to the card (exact steps), then
    `node ~/.claude/skills/orchestrate/runner/run-card.mjs --fix N --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
    It runs the executor (agy continues its conversation; `--fresh` starts a new one — compare the ledger rows),
@@ -139,6 +140,7 @@ conformance review catches a wrong number; only an independent recompute does.
                each one; the reviewer checks them one by one. Omit only when nothing in the task has a value.
 ## Files       may change: `a.py`, `dir/` … / read-only: `data/` … — every path in backticks (the runner reads them:
                may-change paths bound the files check; read-only paths get a size/mtime guard). Data folders always read-only.
+               Git-ignored files are outside the files check: list an ignored path that matters as read-only.
 ## Steps (N = k)  numbered 1..N, the total in the heading; per step: file → function → the exact behaviour change; code snippets
                for anything fiddly (index math, time axes, regexes, API calls the executor may get wrong)
                When a step adds a check or invariant, list every path that can bypass it (cache hit, early
