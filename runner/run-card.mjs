@@ -341,6 +341,8 @@ if (timeoutMinArg !== undefined) {
     process.exit(2);
   }
 }
+const deadline = Date.now() + timeoutMin * 60000;
+const remainingMin = () => (deadline - Date.now()) / 60000;
 
 const cardAbs = card ? path.resolve(card).replaceAll("\\", "/") : "";
 if (cardAbs && !fs.existsSync(cardAbs)) {
@@ -477,12 +479,40 @@ if (isFix) {
 
   baseDir = path.posix.join(stateDir, `${name}.fix${fixRoundN}.base`);
   fs.mkdirSync(baseDir, { recursive: true });
+  function addDirFiles(dirAbs) {
+    let entries;
+    try {
+      entries = fs.readdirSync(dirAbs, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const full = path.posix.join(dirAbs, entry.name);
+      try {
+        const st = fs.statSync(full);
+        if (st.isDirectory()) {
+          addDirFiles(full);
+        } else if (st.isFile()) {
+          const rel = path.posix.relative(repoAbs, full);
+          basePathsSet.add(rel);
+        }
+      } catch {}
+    }
+  }
+
   const basePathsSet = new Set();
   for (const p of mayChange) {
-    const absP = path.resolve(repoAbs, p);
-    if (fs.existsSync(absP) && fs.statSync(absP).isFile()) {
-      basePathsSet.add(p);
-    }
+    const absP = path.resolve(repoAbs, p).replaceAll("\\", "/");
+    if (!fs.existsSync(absP)) continue;
+    try {
+      const st = fs.statSync(absP);
+      if (st.isFile()) {
+        basePathsSet.add(p);
+      } else if (st.isDirectory()) {
+        addDirFiles(absP);
+      }
+    } catch {}
   }
   for (const p of (state.touched || [])) {
     basePathsSet.add(p);
@@ -617,8 +647,18 @@ function snapshot() {
 
 function statTree(paths) {
   const result = {};
+  const seenDirs = new Set();
 
   function walk(dir) {
+    let real;
+    try {
+      real = fs.realpathSync(dir);
+    } catch {
+      return;
+    }
+    if (seenDirs.has(real)) return;
+    seenDirs.add(real);
+
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -631,9 +671,16 @@ function statTree(paths) {
       // A listed ancestor must not pull in what the runner and executor write themselves.
       if (fullPath === normLiveDir || fullPath === cardDirNorm) continue;
       try {
-        if (entry.isDirectory()) {
+        let isDir = entry.isDirectory();
+        let isFile = entry.isFile();
+        if (entry.isSymbolicLink() || (!isFile && !isDir)) {
+          const st = fs.statSync(fullPath);
+          isDir = st.isDirectory();
+          isFile = st.isFile();
+        }
+        if (isDir) {
           walk(fullPath);
-        } else if (entry.isFile()) {
+        } else if (isFile) {
           const st = fs.statSync(fullPath);
           result[fullPath] = [st.size, st.mtimeMs];
         }
@@ -736,65 +783,63 @@ if (process.env.ORCH_RUNNER_FAKE_EXEC) {
   execCmd = `{ echo '{"model":"${model}"}'; codex exec --approve-for-me${isGit ? "" : " --skip-git-repo-check"} -m ${model} -C ${q(repoAbs)} --json ${q(execPrompt)} < /dev/null; } > ${q(S)} 2>&1`;
 }
 
-const execResult = await runBash(execCmd, { cwd: repoAbs, timeoutMin, exitPath: E });
-
-if (execResult.timedOut) {
+if (remainingMin() <= 0) {
   state.outcome = "interrupted";
-  state.exec = { exit: null, status: "interrupted", seconds: execResult.seconds, reply: "" };
+  state.interruptedAt = "executor";
   save(state);
 } else {
-  let reply = null;
-  if (!process.env.ORCH_RUNNER_FAKE_EXEC && fs.existsSync(S)) {
-    const content = fs.readFileSync(S, "utf8");
-    if (executor === "agy") {
+  const execResult = await runBash(execCmd, { cwd: repoAbs, timeoutMin: remainingMin(), exitPath: E });
+
+  if (execResult.timedOut) {
+    state.outcome = "interrupted";
+    state.exec = { exit: null, status: "interrupted", seconds: execResult.seconds, reply: "" };
+    save(state);
+  } else {
+    let reply = null;
+    if (!process.env.ORCH_RUNNER_FAKE_EXEC && fs.existsSync(S)) {
+      const content = fs.readFileSync(S, "utf8");
       const lines = content.trim().split(/\r?\n/).filter(Boolean);
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
           const obj = JSON.parse(lines[i]);
-          if (obj.event === "result") {
-            reply = obj.result?.response ?? (typeof obj.result === "string" ? obj.result : JSON.stringify(obj.result));
-            state.conversationId = obj.result?.conversation_id ?? null;
-            break;
-          }
-        } catch {}
-      }
-    } else {
-      const lines = content.trim().split(/\r?\n/).filter(Boolean);
-      for (let i = lines.length - 1; i >= 0; i--) {
-        try {
-          const obj = JSON.parse(lines[i]);
-          if (obj.item?.type === "agent_message") {
+          if (executor === "agy") {
+            if (obj.event === "result") {
+              reply = obj.result?.response ?? (typeof obj.result === "string" ? obj.result : JSON.stringify(obj.result));
+              state.conversationId = obj.result?.conversation_id ?? null;
+              break;
+            }
+          } else if (obj.item?.type === "agent_message") {
             reply = obj.item.text ?? "";
             break;
           }
         } catch {}
       }
     }
-  }
 
-  if (reply === null || reply === undefined) {
-    const content = fs.existsSync(S) ? fs.readFileSync(S, "utf8") : "";
-    const nonEmpty = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
-    reply = nonEmpty.slice(-(recon ? 40 : 15)).join("\n");
-  }
+    if (reply === null || reply === undefined) {
+      const content = fs.existsSync(S) ? fs.readFileSync(S, "utf8") : "";
+      const nonEmpty = content.split(/\r?\n/).filter((l) => l.trim().length > 0);
+      reply = nonEmpty.slice(-(recon ? 40 : 15)).join("\n");
+    }
 
-  const statusMatch = reply.match(/^STATUS:\s*(done|blocked|failed)\b/m);
-  const status = statusMatch ? statusMatch[1] : "missing";
+    const statusMatch = reply.match(/^STATUS:\s*(done|blocked|failed)\b/m);
+    const status = statusMatch ? statusMatch[1] : "missing";
 
-  state.exec = {
-    exit: execResult.exit,
-    status,
-    seconds: execResult.seconds,
-    reply
-  };
-  save(state);
-
-  if (execResult.exit !== 0 || status === "failed") {
-    state.outcome = "failed";
+    state.exec = {
+      exit: execResult.exit,
+      status,
+      seconds: execResult.seconds,
+      reply
+    };
     save(state);
-  } else if (status === "blocked") {
-    state.outcome = "blocked";
-    save(state);
+
+    if (execResult.exit !== 0 || status === "failed") {
+      state.outcome = "failed";
+      save(state);
+    } else if (status === "blocked") {
+      state.outcome = "blocked";
+      save(state);
+    }
   }
 }
 
@@ -807,11 +852,7 @@ if (!state.outcome && state.readOnlyBefore) {
   }
 }
 
-// 5. Touched files
-if (!state.outcome) {
-  state.stage = "checking-files";
-  save(state);
-
+function scopeCheck() {
   state.after = snapshot();
   const allPaths = new Set([...Object.keys(state.before), ...Object.keys(state.after)]);
   const touched = [];
@@ -842,6 +883,16 @@ if (!state.outcome) {
   junk.sort();
   state.junk = junk;
 
+  return outOfScope;
+}
+
+// 5. Touched files
+if (!state.outcome) {
+  state.stage = "checking-files";
+  save(state);
+
+  const outOfScope = scopeCheck();
+
   const cardNowBytes = fs.readFileSync(cardAbs);
   const cardNowSha = crypto.createHash("sha256").update(cardNowBytes).digest("hex");
   state.cardModified = (cardNowSha !== cardSha);
@@ -863,30 +914,42 @@ if (!state.outcome) {
   state.stage = "checking";
   save(state);
 
-  const checkCmd = `{\n${check}\n} > ${q(checkLog)} 2>&1`;
-  const checkRes = await runBash(checkCmd, { cwd: repoAbs, timeoutMin: 30, exitPath: null });
-
-  if (checkRes.timedOut) {
+  if (remainingMin() <= 0) {
     state.outcome = "interrupted";
-    state.checkResult = { exit: null, log: checkLog };
+    state.interruptedAt = "check";
     save(state);
   } else {
-    state.checkResult = { exit: checkRes.exit, log: checkLog };
-    save(state);
+    const checkCmd = `{\n${check}\n} > ${q(checkLog)} 2>&1`;
+    const checkRes = await runBash(checkCmd, { cwd: repoAbs, timeoutMin: Math.min(30, remainingMin()), exitPath: null });
 
-    if (checkRes.exit !== 0) {
-      state.outcome = "check_failed";
+    if (checkRes.timedOut) {
+      state.outcome = "interrupted";
+      state.checkResult = { exit: null, log: checkLog };
+      save(state);
+    } else {
+      state.checkResult = { exit: checkRes.exit, log: checkLog };
+      save(state);
+
+      if (checkRes.exit !== 0) {
+        state.outcome = "check_failed";
+        save(state);
+      }
+    }
+
+    const checkOutOfScope = scopeCheck();
+    if (checkOutOfScope.length > 0 && state.outcome !== "readonly_violated") {
+      state.outcome = "out_of_scope";
       save(state);
     }
-  }
 
-  // Runs whatever the Check's outcome: a failing Check may still have written to read-only data.
-  if (state.readOnlyBefore) {
-    const roDiff = getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths);
-    if (roDiff) {
-      state.outcome = "readonly_violated";
-      state.readOnlyChanged = roDiff;
-      save(state);
+    // Runs whatever the Check's outcome: a failing Check may still have written to read-only data.
+    if (state.readOnlyBefore) {
+      const roDiff = getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths);
+      if (roDiff) {
+        state.outcome = "readonly_violated";
+        state.readOnlyChanged = roDiff;
+        save(state);
+      }
     }
   }
 }
@@ -929,44 +992,42 @@ if (!state.outcome) {
     fs.rmSync(reviewMdAbs, { force: true });
 
     const skipGitFlag = isGit ? "" : " --skip-git-repo-check";
-    let reviewCmd;
-    if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
-      reviewCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} > ${q(reviewStream)} 2>&1`;
-    } else {
-      reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } > ${q(reviewStream)} 2>&1`;
-    }
-
-    let reviewRes = await runBash(reviewCmd, { cwd: repoAbs, timeoutMin, exitPath: reviewExit });
-
-    if (!reviewRes.timedOut && reviewRes.exit === 0) {
-      let firstLine = "";
-      if (fs.existsSync(reviewMdAbs)) {
-        const content = fs.readFileSync(reviewMdAbs, "utf8");
-        const lines = content.split(/\r?\n/);
-        firstLine = lines[0]?.trim() ?? "";
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (remainingMin() <= 0) {
+        state.outcome = "interrupted";
+        state.interruptedAt = attempt === 0 ? "review" : "retry";
+        save(state);
+        break;
       }
 
-      if (firstLine !== "VERDICT: PASS" && firstLine !== "VERDICT: FAIL") {
+      state.review.retried = attempt === 1;
+      if (attempt === 1) {
         fs.rmSync(reviewMdAbs, { force: true });
-        let retryCmd;
-        if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
-          retryCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} >> ${q(reviewStream)} 2>&1`;
-        } else {
-          retryCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } >> ${q(reviewStream)} 2>&1`;
-        }
-        state.review.retried = true;
-        reviewRes = await runBash(retryCmd, { cwd: repoAbs, timeoutMin, exitPath: reviewExit });
       }
-    }
 
-    if (reviewRes.timedOut) {
-      state.outcome = "interrupted";
-      save(state);
-    } else if (reviewRes.exit !== 0) {
-      state.outcome = "review_error";
-      state.review.verdict = "error";
-      save(state);
-    } else {
+      const redir = attempt === 0 ? ">" : ">>";
+      let reviewCmd;
+      if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
+        reviewCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} ${redir} ${q(reviewStream)} 2>&1`;
+      } else {
+        reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } ${redir} ${q(reviewStream)} 2>&1`;
+      }
+
+      const reviewRes = await runBash(reviewCmd, { cwd: repoAbs, timeoutMin: remainingMin(), exitPath: reviewExit });
+
+      if (reviewRes.timedOut) {
+        state.outcome = "interrupted";
+        save(state);
+        break;
+      }
+
+      if (reviewRes.exit !== 0) {
+        state.outcome = "review_error";
+        state.review.verdict = "error";
+        save(state);
+        break;
+      }
+
       let firstLine = "";
       if (fs.existsSync(reviewMdAbs)) {
         const content = fs.readFileSync(reviewMdAbs, "utf8");
@@ -977,14 +1038,20 @@ if (!state.outcome) {
       if (firstLine === "VERDICT: PASS") {
         state.outcome = "review_pass";
         state.review.verdict = "PASS";
+        save(state);
+        break;
       } else if (firstLine === "VERDICT: FAIL") {
         state.outcome = "review_fail";
         state.review.verdict = "FAIL";
-      } else {
+        save(state);
+        break;
+      }
+
+      if (attempt === 1) {
         state.outcome = "review_error";
         state.review.verdict = firstLine || "error";
+        save(state);
       }
-      save(state);
     }
   }
 }

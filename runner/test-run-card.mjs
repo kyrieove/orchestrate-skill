@@ -77,6 +77,32 @@ No rm, no git push
     ORCH_RUNNER_LIVE_DIR: tempLive
   };
 
+  function runCard(name, { risk, env = baseEnv, args = [], card } = {}) {
+    const isCommit = args.includes("--commit");
+    const isFixRun = args.includes("--fix");
+    const cmdArgs = [runCardScript];
+
+    if (!args.includes("--name") && name) {
+      cmdArgs.push("--name", name);
+    }
+    if (!isCommit && !args.includes("--card")) {
+      cmdArgs.push("--card", card ?? cardPath);
+    }
+    if (!isCommit && !isFixRun && !args.includes("--risk")) {
+      cmdArgs.push("--risk", risk ?? "low");
+    } else if (risk && !args.includes("--risk")) {
+      cmdArgs.push("--risk", risk);
+    }
+    if (!isCommit && !isFixRun && !args.includes("--executor")) {
+      cmdArgs.push("--executor", "agy");
+    }
+    if (!isCommit && !args.includes("--repo")) {
+      cmdArgs.push("--repo", tempRepo);
+    }
+    cmdArgs.push(...args);
+    return spawnSync(process.execPath, cmdArgs, { env, encoding: "utf8" });
+  }
+
   // Case A: write "2" to a.txt (pre-dirty), fake exec echo 3 > a.txt; echo x > b.txt; echo 'STATUS: done', check
   // node -e "process.exit(0)", risk low → passed_no_review; touched contains a.txt and b.txt
   {
@@ -89,14 +115,7 @@ No rm, no git push
     };
     delete envA.ORCH_RUNNER_FAKE_REVIEW;
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-a",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: envA, encoding: "utf8" });
+    const res = runCard("case-a", { env: envA });
 
     assert.strictEqual(res.status, 0, `Case A exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-a");
@@ -116,14 +135,7 @@ No rm, no git push
     };
     delete envB.ORCH_RUNNER_FAKE_REVIEW;
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-b",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: envB, encoding: "utf8" });
+    const res = runCard("case-b", { env: envB });
 
     assert.strictEqual(res.status, 0, `Case B exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-b");
@@ -143,14 +155,7 @@ No rm, no git push
     };
     delete envC.ORCH_RUNNER_FAKE_REVIEW;
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-c",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: envC, encoding: "utf8" });
+    const res = runCard("case-c", { env: envC });
 
     assert.strictEqual(res.status, 0, `Case C exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-c");
@@ -169,14 +174,7 @@ No rm, no git push
     };
     delete envD.ORCH_RUNNER_FAKE_REVIEW;
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-d",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: envD, encoding: "utf8" });
+    const res = runCard("case-d", { env: envD });
 
     assert.strictEqual(res.status, 0, `Case D exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-d");
@@ -197,15 +195,7 @@ No rm, no git push
     delete envE.ORCH_RUNNER_FAKE_REVIEW;
 
     const start = Date.now();
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-e",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo,
-      "--timeout-min", "0.05"
-    ], { env: envE, encoding: "utf8" });
+    const res = runCard("case-e", { env: envE, args: ["--timeout-min", "0.05"] });
 
     const elapsed = Date.now() - start;
     assert.ok(elapsed < 6000, `Interrupted elapsed time was ${elapsed}ms, expected < 6000ms`);
@@ -232,14 +222,7 @@ No rm, no git push
       ORCH_RUNNER_FAKE_REVIEW: "exit 1"
     };
 
-    const res1 = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-f-stale",
-      "--executor", "agy",
-      "--risk", "medium",
-      "--repo", tempRepo
-    ], { env: envF1, encoding: "utf8" });
+    const res1 = runCard("case-f-stale", { risk: "medium", env: envF1 });
 
     assert.strictEqual(res1.status, 0, `Case F stale review exit status was ${res1.status}: ${res1.stderr}`);
     const state1 = readState("case-f-stale");
@@ -254,14 +237,7 @@ No rm, no git push
       ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md"
     };
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-f",
-      "--executor", "agy",
-      "--risk", "medium",
-      "--repo", tempRepo
-    ], { env: envF, encoding: "utf8" });
+    const res = runCard("case-f", { risk: "medium", env: envF });
 
     assert.strictEqual(res.status, 0, `Case F exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-f");
@@ -295,14 +271,7 @@ may change: \`a.txt\`, \`b.txt\` / read-only: \`data/\`
     const markerStream = path.join(tempLive, "agy-case-g.jsonl").replaceAll("\\", "/");
     fs.writeFileSync(markerStream, "marker", "utf8");
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-g",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: baseEnv, encoding: "utf8" });
+    const res = runCard("case-g");
 
     assert.strictEqual(res.status, 2, `Case G exit status was ${res.status}: ${res.stderr}`);
     assert.ok(res.stderr.includes("lint:"), "Case G stderr should contain lint:");
@@ -320,14 +289,7 @@ may change: \`a.txt\`, \`b.txt\` / read-only: \`data/\`
     const markerStream = path.join(tempLive, "agy-case-h.jsonl").replaceAll("\\", "/");
     fs.writeFileSync(markerStream, "marker", "utf8");
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-h",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: baseEnv, encoding: "utf8" });
+    const res = runCard("case-h", { risk: "low" });
 
     assert.strictEqual(res.status, 2, `Case H exit status was ${res.status}: ${res.stderr}`);
     assert.ok(res.stderr.includes("lint:"), "Case H stderr should contain lint:");
@@ -348,14 +310,7 @@ may change: \`a.txt\`, \`b.txt\` / read-only: \`data/\`
     };
     delete envI.ORCH_RUNNER_FAKE_REVIEW;
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-i",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: envI, encoding: "utf8" });
+    const res = runCard("case-i", { env: envI });
 
     assert.strictEqual(res.status, 0, `Case I exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-i");
@@ -374,14 +329,7 @@ may change: \`a.txt\`, \`b.txt\` / read-only: \`data/\`
     };
     delete envJ.ORCH_RUNNER_FAKE_REVIEW;
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-j",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: envJ, encoding: "utf8" });
+    const res = runCard("case-j", { env: envJ });
 
     assert.strictEqual(res.status, 0, `Case J exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-j");
@@ -419,15 +367,7 @@ No rm, no git push
     };
     delete envK.ORCH_RUNNER_FAKE_REVIEW;
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--recon",
-      "--card", cardPath,
-      "--name", "case-k",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: envK, encoding: "utf8" });
+    const res = runCard("case-k", { env: envK, args: ["--recon"] });
 
     assert.strictEqual(res.status, 0, `Case K exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-k");
@@ -448,14 +388,7 @@ No rm, no git push
       ORCH_RUNNER_FAKE_REVIEW: `if [ ! -f '${counterFile}' ]; then echo 1 > '${counterFile}'; echo 'no verdict here' > docs/orch/t/review.md; else echo 'VERDICT: PASS' > docs/orch/t/review.md; fi`
     };
 
-    const res = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-l",
-      "--executor", "agy",
-      "--risk", "medium",
-      "--repo", tempRepo
-    ], { env: envL, encoding: "utf8" });
+    const res = runCard("case-l", { risk: "medium", env: envL });
 
     assert.strictEqual(res.status, 0, `Case L exit status was ${res.status}: ${res.stderr}`);
     const state = readState("case-l");
@@ -478,14 +411,7 @@ No rm, no git push
     };
     delete envM1.ORCH_RUNNER_FAKE_REVIEW;
 
-    const resM1 = spawnSync(process.execPath, [
-      runCardScript,
-      "--card", cardPath,
-      "--name", "case-m",
-      "--executor", "agy",
-      "--risk", "low",
-      "--repo", tempRepo
-    ], { env: envM1, encoding: "utf8" });
+    const resM1 = runCard("case-m", { env: envM1 });
 
     assert.strictEqual(resM1.status, 0, `Case M (round 1) exit status was ${resM1.status}: ${resM1.stderr}`);
     const stateM1 = readState("case-m");
@@ -501,13 +427,7 @@ No rm, no git push
     };
     delete envM2.ORCH_RUNNER_FAKE_REVIEW;
 
-    const resM2 = spawnSync(process.execPath, [
-      runCardScript,
-      "--fix", "1",
-      "--card", cardPath,
-      "--name", "case-m",
-      "--repo", tempRepo
-    ], { env: envM2, encoding: "utf8" });
+    const resM2 = runCard("case-m", { args: ["--fix", "1"], env: envM2 });
 
     assert.strictEqual(resM2.status, 0, `Case M (fix 1) exit status was ${resM2.status}: ${resM2.stderr}`);
     const stateM2 = readState("case-m");
@@ -528,22 +448,10 @@ No rm, no git push
 
   // Case N (fix guards): right after M, --fix 3 → exit 2; on a fresh name with no state file --fix 1 → exit 2.
   {
-    const resN1 = spawnSync(process.execPath, [
-      runCardScript,
-      "--fix", "3",
-      "--card", cardPath,
-      "--name", "case-m",
-      "--repo", tempRepo
-    ], { env: baseEnv, encoding: "utf8" });
+    const resN1 = runCard("case-m", { args: ["--fix", "3"] });
     assert.strictEqual(resN1.status, 2, `Expected exit 2 for --fix 3, got ${resN1.status}`);
 
-    const resN2 = spawnSync(process.execPath, [
-      runCardScript,
-      "--fix", "1",
-      "--card", cardPath,
-      "--name", "non-existent-name",
-      "--repo", tempRepo
-    ], { env: baseEnv, encoding: "utf8" });
+    const resN2 = runCard("non-existent-name", { args: ["--fix", "1"] });
     assert.strictEqual(resN2.status, 2, `Expected exit 2 for fresh name with no state file, got ${resN2.status}`);
     passedCount++;
   }
@@ -552,12 +460,7 @@ No rm, no git push
   // by ## Acceptance + - verdict: accepted, create an unrelated untracked z.txt, run --commit --message t
   // → exit 0 and git show --name-only --format= HEAD lists exactly a.txt, b.txt, docs/orch/t/card.md.
   {
-    const resO1 = spawnSync(process.execPath, [
-      runCardScript,
-      "--commit",
-      "--name", "case-m",
-      "--message", "t"
-    ], { env: baseEnv, encoding: "utf8" });
+    const resO1 = runCard("case-m", { args: ["--commit", "--message", "t"] });
     assert.strictEqual(resO1.status, 2, `Expected exit 2 while draft heading is present, got ${resO1.status}`);
 
     const cardContent = fs.readFileSync(cardPath, "utf8");
@@ -566,12 +469,7 @@ No rm, no git push
 
     fs.writeFileSync(path.join(tempRepo, "z.txt"), "unrelated untracked", "utf8");
 
-    const resO2 = spawnSync(process.execPath, [
-      runCardScript,
-      "--commit",
-      "--name", "case-m",
-      "--message", "t"
-    ], { env: baseEnv, encoding: "utf8" });
+    const resO2 = runCard("case-m", { args: ["--commit", "--message", "t"] });
     assert.strictEqual(resO2.status, 0, `Expected exit 0 for --commit, got ${resO2.status}: ${resO2.stderr}`);
 
     const showRes = spawnSync("git", ["-C", tempRepo, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
@@ -698,14 +596,11 @@ No rm, no git push
       };
       delete envR1.ORCH_RUNNER_FAKE_REVIEW;
 
-      const resR1 = spawnSync(process.execPath, [
-        runCardScript,
-        "--card", nonGitCardPath,
-        "--name", "case-r1",
-        "--executor", "agy",
-        "--risk", "low",
-        "--repo", nonGitRepo
-      ], { env: envR1, encoding: "utf8" });
+      const resR1 = runCard("case-r1", {
+        card: nonGitCardPath,
+        args: ["--repo", nonGitRepo],
+        env: envR1
+      });
 
       assert.strictEqual(resR1.status, 0, `Case R1 exit status was ${resR1.status}: ${resR1.stderr}`);
       const stateR1 = readState("case-r1");
@@ -718,14 +613,11 @@ No rm, no git push
       };
       delete envR2.ORCH_RUNNER_FAKE_REVIEW;
 
-      const resR2 = spawnSync(process.execPath, [
-        runCardScript,
-        "--card", nonGitCardPath,
-        "--name", "case-r2",
-        "--executor", "agy",
-        "--risk", "low",
-        "--repo", nonGitRepo
-      ], { env: envR2, encoding: "utf8" });
+      const resR2 = runCard("case-r2", {
+        card: nonGitCardPath,
+        args: ["--repo", nonGitRepo],
+        env: envR2
+      });
 
       assert.strictEqual(resR2.status, 0, `Case R2 exit status was ${resR2.status}: ${resR2.stderr}`);
       const stateR2 = readState("case-r2");
@@ -800,11 +692,148 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 19) {
-    console.log("19/19 passed");
+  // Case T: fake exec only writes b.txt (allowed); Check node -e "require('fs').writeFileSync('z.txt','1')" →
+  // out_of_scope with z.txt in outOfScope.
+  {
+    resetRepo();
+    writeCard('node -e "require(\'fs\').writeFileSync(\'z.txt\',\'1\')"');
+    const envT = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo b > b.txt; echo 'STATUS: done'"
+    };
+    delete envT.ORCH_RUNNER_FAKE_REVIEW;
+
+    const res = runCard("case-t", { env: envT });
+    assert.strictEqual(res.status, 0, `Case T exit status was ${res.status}: ${res.stderr}`);
+    const state = readState("case-t");
+    assert.strictEqual(state.outcome, "out_of_scope");
+    assert.ok(state.outOfScope && state.outOfScope.includes("z.txt"), `Expected z.txt in outOfScope, got ${state.outOfScope}`);
+    passedCount++;
+  }
+
+  // Case U: the read-only dir data/ contains a directory symlink data/link → a temp dir outside the repo holding f.txt
+  // (create with fs.symlinkSync(target, link, "junction")); fake exec appends to <target>/f.txt → readonly_violated.
+  {
+    resetRepo();
+    writeCard('node -e "process.exit(0)"');
+    const extDir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-ext-")).replaceAll("\\", "/");
+    const linkPath = path.join(tempRepo, "data/link").replaceAll("\\", "/");
+    try {
+      fs.writeFileSync(path.join(extDir, "f.txt"), "hello", "utf8");
+      fs.symlinkSync(extDir, linkPath, "junction");
+
+      const targetFile = path.join(extDir, "f.txt").replaceAll("\\", "/");
+      const envU = {
+        ...baseEnv,
+        ORCH_RUNNER_FAKE_EXEC: `node -e "require('fs').appendFileSync('${targetFile}','more')"; echo 'STATUS: done'`
+      };
+      delete envU.ORCH_RUNNER_FAKE_REVIEW;
+
+      const res = runCard("case-u", { env: envU });
+      assert.strictEqual(res.status, 0, `Case U exit status was ${res.status}: ${res.stderr}`);
+      const state = readState("case-u");
+      assert.strictEqual(state.outcome, "readonly_violated");
+      assert.ok(state.readOnlyChanged && state.readOnlyChanged.some((p) => p.includes("f.txt")), "readOnlyChanged should include f.txt");
+      passedCount++;
+    } finally {
+      try { fs.rmSync(linkPath, { force: true }); } catch {}
+      fs.rmSync(extDir, { recursive: true, force: true });
+    }
+  }
+
+  // Case V: --timeout-min 0.1, fake exec sleep 4; echo 'STATUS: done', Check sleep 4 (bash) → finishes within 12 s with
+  // outcome interrupted (the Check got only the remaining ~2 s).
+  {
+    resetRepo();
+    writeCard("sleep 4");
+    const envV = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "sleep 4; echo 'STATUS: done'"
+    };
+    delete envV.ORCH_RUNNER_FAKE_REVIEW;
+
+    const startV = Date.now();
+    const res = runCard("case-v", { env: envV, args: ["--timeout-min", "0.1"] });
+    const elapsedV = (Date.now() - startV) / 1000;
+
+    assert.strictEqual(res.status, 0, `Case V exit status was ${res.status}: ${res.stderr}`);
+    assert.ok(elapsedV < 12.0, `Expected finish within 12s, took ${elapsedV}s`);
+    const state = readState("case-v");
+    assert.strictEqual(state.outcome, "interrupted");
+    passedCount++;
+  }
+
+  // Case W: card Files may change: `src/`, repo commits src/old.txt = "a"; round 1 fake exec writes src/new.txt
+  // (risk low → passed_no_review); append ## Fix 1; --fix 1 fake exec echo b > src/old.txt → the fix diff
+  // contains -a and +b for src/old.txt (not a whole-file add).
+  {
+    resetRepo();
+    const srcDir = path.join(tempRepo, "src");
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(srcDir, "old.txt"), "a\n", "utf8");
+    spawnSync("git", ["add", "src/old.txt"], { cwd: tempRepo, stdio: "ignore" });
+    spawnSync("git", ["commit", "-m", "commit src/old.txt"], { cwd: tempRepo, stdio: "ignore" });
+
+    const cardW = `# test-task — test card
+
+## Goal
+Test fix with dir.
+
+## Risk
+low
+
+## Files
+may change: \`src/\` / read-only: \`data/\`
+
+## Steps (N = 1)
+1. Step 1.
+
+## Check
+\`node -e "process.exit(0)"\`
+
+## Don't
+Run scripts in the foreground and wait
+Reuse existing functions
+No rm, no git push
+`;
+    fs.writeFileSync(cardPath, cardW, "utf8");
+
+    const envW1 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo new > src/new.txt; echo 'STATUS: done'"
+    };
+    delete envW1.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resW1 = runCard("case-w", { env: envW1 });
+    assert.strictEqual(resW1.status, 0, `Case W1 exit status was ${resW1.status}: ${resW1.stderr}`);
+    const stateW1 = readState("case-w");
+    assert.strictEqual(stateW1.outcome, "passed_no_review");
+
+    fs.appendFileSync(cardPath, "\n## Fix 1\n1. Fix step.\n", "utf8");
+
+    const envW2 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo b > src/old.txt; echo 'STATUS: done'"
+    };
+    delete envW2.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resW2 = runCard("case-w", { args: ["--fix", "1"], env: envW2 });
+    assert.strictEqual(resW2.status, 0, `Case W2 exit status was ${resW2.status}: ${resW2.stderr}`);
+    const stateW2 = readState("case-w");
+    assert.strictEqual(stateW2.outcome, "fix_passed");
+
+    const diffFile = path.join(tempLive, "orch-runner", "case-w.fix1.diff");
+    assert.ok(fs.existsSync(diffFile), "diff file should exist");
+    const diffText = fs.readFileSync(diffFile, "utf8");
+    assert.ok(diffText.includes("-a") && diffText.includes("+b"), `diff should contain -a and +b, got: ${diffText}`);
+    passedCount++;
+  }
+
+  if (passedCount === 23) {
+    console.log("23/23 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/19 passed`);
+    console.error(`Only ${passedCount}/23 passed`);
     process.exitCode = 1;
   }
 } finally {

@@ -49,18 +49,28 @@ for (const file of files) {
     }
   }
 
-  if (!groups.has(groupKey)) {
-    groups.set(groupKey, []);
+  let g = groups.get(groupKey);
+  if (!g) {
+    g = {
+      cards: 0,
+      fixes: 0,
+      execSec: 0,
+      fresh: 0,
+      cached: 0,
+      out: 0,
+      tokenCards: 0,
+      outcomes: {}
+    };
+    groups.set(groupKey, g);
   }
-  groups.get(groupKey).push({
-    outcome,
-    fixes: fixesCount,
-    execSec,
-    fresh,
-    cached,
-    out,
-    hasTokens
-  });
+  g.cards++;
+  g.fixes += fixesCount;
+  g.execSec += execSec;
+  g.fresh += fresh;
+  g.cached += cached;
+  g.out += out;
+  if (hasTokens) g.tokenCards++;
+  g.outcomes[outcome] = (g.outcomes[outcome] || 0) + 1;
   totalCards++;
 }
 
@@ -68,31 +78,19 @@ const k = (n) => `${Math.round(n / 1000)}k`;
 
 const sortedKeys = Array.from(groups.keys()).sort();
 for (const key of sortedKeys) {
-  const cards = groups.get(key);
-  const cardCount = cards.length;
-  const totalFixes = cards.reduce((sum, c) => sum + c.fixes, 0);
-  const totalExecSec = cards.reduce((sum, c) => sum + c.execSec, 0);
-  const totalFresh = cards.reduce((sum, c) => sum + c.fresh, 0);
-  const totalCached = cards.reduce((sum, c) => sum + c.cached, 0);
-  const totalOut = cards.reduce((sum, c) => sum + c.out, 0);
-
-  const avgExecMin = cardCount > 0 ? (totalExecSec / cardCount / 60).toFixed(1) : "0.0";
+  const g = groups.get(key);
+  const avgExecMin = g.cards > 0 ? (g.execSec / g.cards / 60).toFixed(1) : "0.0";
   // Older state files kept the ledger as text: average tokens only over cards that have numbers.
-  const tokenCards = cards.filter((c) => c.hasTokens).length;
-  const avgFresh = tokenCards > 0 ? Math.round(totalFresh / tokenCards) : 0;
-  const avgCached = tokenCards > 0 ? Math.round(totalCached / tokenCards) : 0;
-  const avgOut = tokenCards > 0 ? Math.round(totalOut / tokenCards) : 0;
+  const avgFresh = g.tokenCards > 0 ? Math.round(g.fresh / g.tokenCards) : 0;
+  const avgCached = g.tokenCards > 0 ? Math.round(g.cached / g.tokenCards) : 0;
+  const avgOut = g.tokenCards > 0 ? Math.round(g.out / g.tokenCards) : 0;
 
-  const outcomeCounts = {};
-  for (const c of cards) {
-    outcomeCounts[c.outcome] = (outcomeCounts[c.outcome] || 0) + 1;
-  }
-  const outcomesStr = Object.keys(outcomeCounts)
+  const outcomesStr = Object.keys(g.outcomes)
     .sort()
-    .map((o) => `${o}:${outcomeCounts[o]}`)
+    .map((o) => `${o}:${g.outcomes[o]}`)
     .join(" ");
 
-  console.log(`${key}  cards ${cardCount}  outcomes ${outcomesStr}  fixes ${totalFixes}  exec ${avgExecMin}m  fresh ${k(avgFresh)} cached ${k(avgCached)} out ${k(avgOut)}`);
+  console.log(`${key}  cards ${g.cards}  outcomes ${outcomesStr}  fixes ${g.fixes}  exec ${avgExecMin}m  fresh ${k(avgFresh)} cached ${k(avgCached)} out ${k(avgOut)}`);
 }
 
 console.log(`total cards ${totalCards}`);
