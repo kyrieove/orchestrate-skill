@@ -3,14 +3,16 @@
 //   node cost.mjs [transcript.jsonl]
 // 不带参数：取 ~/.claude/projects/ 下最近修改的那个。
 //
-// effective = input×1 + cache_creation×1.25 + cache_read×0.1 + output×5
+// effective = input×1 + cache_creation×1.25（1 小时缓存×2）+ cache_read×0.1 + output×5
 // （Anthropic 相对 base input 的计价倍率）
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
 
-const W = { inp: 1, cc: 1.25, cr: 0.1, out: 5 };
-const eff = r => r.inp * W.inp + r.cc * W.cc + r.cr * W.cr + r.out * W.out;
+const W = { inp: 1, cc: 1.25, cc1h: 2, cr: 0.1, out: 5 };
+// cc counts every cache write; the 1-hour share of it costs 2× instead of 1.25×.
+const ccCost = r => r.cc * W.cc + r.cc1h * (W.cc1h - W.cc);
+const eff = r => r.inp * W.inp + ccCost(r) + r.cr * W.cr + r.out * W.out;
 const M = n => (Math.round(n / 1e4) / 100) + 'M';
 const K = n => Math.round(n / 1e3) + 'k';
 
@@ -53,6 +55,7 @@ for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
     ts: o.timestamp || '',
     inp: u.input_tokens || 0,
     cc: u.cache_creation_input_tokens || 0,
+    cc1h: u.cache_creation?.ephemeral_1h_input_tokens || 0,
     cr: u.cache_read_input_tokens || 0,
     out: u.output_tokens || 0,
     get ctx() { return this.inp + this.cc + this.cr },
@@ -92,7 +95,7 @@ for (const cap of [150e3, 200e3, 300e3]) {
   if (!over.length) { console.log('超过 ' + K(cap) + ' 的调用：0 次 —— 这个会话很干净'); continue; }
   const now = over.reduce((a, r) => a + eff(r), 0);
   // 重置后这些调用仍要付各自的新增部分，但 cache_read 封顶在 cap
-  const capped = over.reduce((a, r) => a + (r.inp * W.inp + r.cc * W.cc + Math.min(r.cr, cap) * W.cr + r.out * W.out), 0);
+  const capped = over.reduce((a, r) => a + (r.inp * W.inp + ccCost(r) + Math.min(r.cr, cap) * W.cr + r.out * W.out), 0);
   const saved = (now - capped) / total * 100;
   console.log('在 ' + K(cap) + ' 处重置：', String(over.length).padStart(4), '次调用超标  ',
     M(total), '→', M(total - now + capped), ' 省 ' + saved.toFixed(0) + '%');

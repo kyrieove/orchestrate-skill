@@ -8,13 +8,13 @@ description: Claude plans and accepts; agy or codex executes a detailed task car
 **Why this shape.** Executors following explicit steps are fast and cheap. Executors *figuring things
 out* — reading large files, designing, re-running whole test suites, reworking after strict reviews —
 cost tens of times more (measured 2026-10-01: a goal-only agy card burned 2.2 M fresh + 18 M cached
-input tokens). So design stays with Claude: the card says exactly what to do, a hand does it, Claude
-accepts. Claude never reads a full diff — that is the most expensive mechanical work and belongs to a reviewer.
+input tokens). So design stays with Claude and the card says exactly what to do.
 
 **Who writes.** Dispatch costs Claude 3–5k output tokens (card, dispatch, acceptance; measured 2026-10-04 on a
 1-line edit). Claude writes directly when that is cheaper and needs no design hand-off: small edits, and
 self-contained helpers it can write in one go (e.g. the 25-line `ledger.mjs`). Anything coupled to existing code,
-long, or needing a test loop is dispatched. The user sends other small jobs to `/son5`.
+long, or needing a test loop is dispatched. Not in fixed modes (`/agy`, `/luna`, `/sol`) or when the user asked
+Claude not to implement. The user sends other small jobs to `/son5`.
 
 ## Modes (executor is set by the command)
 
@@ -132,15 +132,10 @@ conformance review catches a wrong number; only an independent recompute does.
                review because a cache hit returned before the new check.)
 ## Check       one command, the fastest existing test that proves the goal; add ONE small new test
                only for a bug with a crisp repro, and spell it out here
-## Don't       no commits, no other files, no refactors beyond the steps, reuse helper X instead of copying
+## Don't       no commits, no other files, no refactors beyond the steps, reuse helper X instead of copying; and always:
+               "Run scripts in the foreground and wait; before replying, stop any background task still running."
+               "Reuse existing functions; don't copy existing logic." "No rm, no git push, no git checkout . / restore . / reset --hard."
 ```
-
-Every card also carries these lines in `## Don't` (lessons, each cost real time):
-- "Inside your own session, run scripts in the foreground and wait for them. Before replying, make sure
-  no background task is still running; stop any that is." (agy otherwise idles up to 30 min waiting for its own background
-  tasks — 2026-09-24 it finished at 5/5 and exited 36 min later.)
-- "Reuse existing functions; don't copy existing logic." (executors copy code — 2026-09-30.)
-- "No rm, no git push, no git checkout . / restore . / reset --hard."
 
 Later sections appended in the same file: `## Fix 1`, `## Fix 2`, `## Acceptance`. Each task folder
 holds only `card.md` and `review.md`.
@@ -149,7 +144,8 @@ holds only `card.md` and `review.md`.
 
 When the task reads raw data or writes results into an untracked folder, the card must also say:
 - raw data directories are read-only: no delete, move, rename or in-place overwrite;
-- the output directory must not exist yet; if it does, stop — never clear or reuse it;
+- the output directory must not exist at the first start; if it does, stop — never clear or reuse it. A resume
+  reuses it only after the script checks its own saved run parameters (e.g. `run_params.json`) match;
 - temp files, logs and results all stay in the output directory;
 - compare the raw-file list, sizes and mtimes before and after; any difference = failure, stop;
 - **checkpoint / resume** (user's hard requirement, 2026-09-24): any script expected to run > 10 min
@@ -163,15 +159,16 @@ When the task reads raw data or writes results into an untracked folder, the car
 ## Commands
 
 Run `mkdir -p ~/.claude/agent-live` once first. Before every dispatch create `T=$(mktemp -d)` (used by the
-commands) and clear same-name leftovers:
-`rm -f ~/.claude/agent-live/{agy,codex,codex-review,run}-<name>.{jsonl,progress,exit}`.
+commands). Only at a card's first dispatch, clear same-name leftovers:
+`rm -f ~/.claude/agent-live/{agy,codex,codex-review,run}-<name>.{jsonl,progress,exit}` — later dispatches (review,
+fixes) must not, or the ledger loses the earlier rows; a re-run of the same role first saves its ledger row.
 
 Progress line — append to every executor instruction: "after starting, append `0/N 已完成：无 · 正在：<第1步>`, and after finishing each step append `k/N 已完成：X · 正在：Y` (Chinese; Y names the file / function and the action, 15–30 characters, e.g. `2/5 已完成：读 README · 正在：在 README 的 Demo 前插入 Quota row 一节`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to <abs ~/.claude/agent-live/<agy|codex>-<name>.progress>. Just append; do not open, list or inspect that directory or any other file to learn the format." The last sentence matters: in the 2026-10-04 test agy spent most of 165k input + 479k cached tokens exploring `agent-live/` for a 1-line edit. The token-weather mod shows it as the lane progress bar, only in the session whose Bash command spells out the `agent-live/<name>.jsonl` path literally (no shell variables in the name). The lane crops the line's end on a narrow screen, so keep X short and put any changing count first in Y (`正在：T-AAHC交叉验证 76/100（k-means 已完）`, not `正在：交叉验证 k-means 72/72 · T-AAHC 76/100`): on 2026-10-04 the count sat at the end, was cropped, and the lane looked frozen. A sub-step counter Claude writes itself (a silent background loop appending to the same `.progress`) follows the same rule.
 
 **agy** (model fixed; `-p` ignores stdin, so it reads the card from disk):
 
 ```bash
-C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p "Read <abs card.md> and carry out every step exactly; run only the Check command; do not commit. Reply with: files changed, check result, anything you could not do. <progress line>" --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format stream-json 2>&1 | tee ~/.claude/agent-live/agy-<name>.jsonl > $T/agy.jsonl; echo ${PIPESTATUS[0]} > ~/.claude/agent-live/agy-<name>.exit; echo done > $T/done
+C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p "Read <abs card.md> and carry out every step exactly; run only the commands the Steps and the Check name; do not commit. Reply with: files changed, check result, anything you could not do. <progress line>" --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format stream-json 2>&1 | tee ~/.claude/agent-live/agy-<name>.jsonl > $T/agy.jsonl; echo ${PIPESTATUS[0]} > ~/.claude/agent-live/agy-<name>.exit; echo done > $T/done
 ```
 
 Fix rounds add `--conversation <conversation_id>`. agy's reply and `conversation_id` are in the last
@@ -182,15 +179,17 @@ whole file. If the last line is not a result (crash, killed), read the last few 
 **codex executes** (`/luna`, `/sol`, or `/orch` picking codex):
 
 ```bash
-{ echo '{"model":"<model>"}'; codex exec --approve-for-me -m <model> -C <repo> --json "Read <abs card.md> and carry out every step exactly; run only the Check command; do not commit. Reply with: files changed, check result, anything you could not do. <progress line>" < /dev/null; } > ~/.claude/agent-live/codex-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-<name>.exit; echo done > $T/done
+{ echo '{"model":"<model>"}'; codex exec --approve-for-me -m <model> -C <repo> --json "Read <abs card.md> and carry out every step exactly; run only the commands the Steps and the Check name; do not commit. Reply with: files changed, check result, anything you could not do. <progress line>" < /dev/null; } > ~/.claude/agent-live/codex-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-<name>.exit; echo done > $T/done
 ```
 
-(no `-s` with `--approve-for-me`). `< /dev/null` is required: with stdin left open codex prints "Reading additional input from stdin..." and hangs (2026-10-04). The first line names the lane (`GPT-6 Luna` / `GPT-6.1 Sol`).
+(no `-s` with `--approve-for-me`; outside git add `--skip-git-repo-check`, review against the file snapshot, and write
+`commit: n/a` in Acceptance). `< /dev/null` is required: with stdin left open codex prints "Reading additional input from stdin..." and hangs (2026-10-04). The first line names the lane (`GPT-6 Luna` / `GPT-6.1 Sol`).
 
-**codex conformance review** (read-only; `<reviewer>` = `gpt-6-luna` for medium risk, `gpt-6.1-sol` for high):
+**codex conformance review** (read-only; `<reviewer>`: luna or sol executed → `gpt-6.1-sol` (fresh session); otherwise
+`gpt-6-luna` for medium risk, `gpt-6.1-sol` for high):
 
 ```bash
-{ echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files were already changed before this task and are not part of it: <paths from the before snapshot>. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each with file:line, the problem and the fix — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
+{ echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: <paths from the before snapshot>. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each with file:line, the problem and the fix — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
 ```
 
 Fill `<paths from the before snapshot>` from step 3 (2026-10-04: without it sol failed a card for the user's own earlier edits). Run the review in the background too.
@@ -202,12 +201,10 @@ The user watches progress in the token-weather lane at zero token cost; Claude i
 background task's completion notice.
 
 Tell the user one line on: dispatch, done, review done, fix dispatched, accepted — each naming the risk tier
-where relevant. Claude never calls an executor in the foreground — a Bash call over 10 min is cut off and the
-conversation goes silent.
+where relevant.
 
 ## Pitfalls
 
 - codex's sandbox can't write `~/.mne`: for MNE code put `_MNE_FAKE_HOME_DIR=<temp dir>` in the check.
 - Don't run agy inside codex (no sign-in there) or vice versa.
-- Executors leave junk files — `git status` at acceptance; delete them before committing.
 - Cost check: `node ~/.claude/skills/orchestrate/cost.mjs <transcript.jsonl>`.
