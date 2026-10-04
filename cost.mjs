@@ -16,6 +16,7 @@ const K = n => Math.round(n / 1e3) + 'k';
 
 function latestTranscript() {
   const root = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(root)) return null;
   let best = null;
   for (const d of fs.readdirSync(root)) {
     const dir = path.join(root, d);
@@ -91,7 +92,7 @@ for (const cap of [150e3, 200e3, 300e3]) {
   if (!over.length) { console.log('超过 ' + K(cap) + ' 的调用：0 次 —— 这个会话很干净'); continue; }
   const now = over.reduce((a, r) => a + eff(r), 0);
   // 重置后这些调用仍要付各自的新增部分，但 cache_read 封顶在 cap
-  const capped = over.reduce((a, r) => a + (r.inp * W.inp + r.cc * W.cc + cap * W.cr + r.out * W.out), 0);
+  const capped = over.reduce((a, r) => a + (r.inp * W.inp + r.cc * W.cc + Math.min(r.cr, cap) * W.cr + r.out * W.out), 0);
   const saved = (now - capped) / total * 100;
   console.log('在 ' + K(cap) + ' 处重置：', String(over.length).padStart(4), '次调用超标  ',
     M(total), '→', M(total - now + capped), ' 省 ' + saved.toFixed(0) + '%');
