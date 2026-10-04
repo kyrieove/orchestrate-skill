@@ -24,7 +24,15 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
 
 **进度**：runner 完成（卡 1–5，2177aee），SKILL.md 默认走 runner；retro（2026-10-05）已落地：共享工具代码用 sol 审、同模块 4–5 张卡后跑 sol 整仓 audit 并回填 K missed、v16 数字改为按轮、本地 pre-commit 钩子（`.git/hooks/pre-commit`，未入库：node --check + 测试）。
 
-**下一步（新会话）**：卡 6 —— 把 `runner/run-card.mjs`（~1280 行）按阶段拆成模块（lint / snapshot+scope / executor / review / acceptance+commit），每张卡只碰小文件；依据：agy 缓存读取随文件变大从 1.8M 涨到 9.3M/卡。共享工具 → 审查用 sol。顺带实测 `--fresh` 与续会话修复的 token。
+**卡 6 完成（2026-10-05，1a05333）**：run-card.mjs 拆成 card / snapshot / executor / review / acceptance / commit 六个模块；
+run-card.mjs 仍有 677 行（目标 600），剩下是参数/状态初始化和摘要打印。新增 `--reviewer luna|sol`（54504dc）。
+
+**下一步（新会话）**
+1. 🐞 `run-card.mjs --commit` 提交时 pre-commit 钩子里的 `node runner/test-run-card.mjs` 失败，同样的暂存内容直接 `git commit` 就通过
+   （卡 6 只好手动提交，state 里没记 commit）。先查：runner 起 git 时传下去的环境变量（GIT_* / ORCH_RUNNER_*）是否漏进测试的子进程。
+2. token 实测：卡 6 的 Fix 1 续 agy 会话，fresh 799k，比第 1 轮整卡（fresh 335k）还多，只是删 ~40 行。下一个修复轮用 `--fresh` 跑，对比后决定 SKILL.md 默认续会话还是新会话。
+3. 若要继续缩：把参数校验 + 状态初始化挪到 `runner/setup.mjs`、摘要打印挪到 `runner/summary.mjs`。
+4. 卡 6 算 runner 模块第 6 张卡：按 retro 规则该跑一次 sol 整仓 audit（`/rv` 整体），回填 K missed。
 
 **后续卡（2026-10-05 定，run-card 验收后按顺序写卡派发）**
 - 卡 2 · 跑之前/跑当中（改 `run-card.mjs`）：
