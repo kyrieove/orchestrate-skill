@@ -8,6 +8,8 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const runCardScript = path.resolve(__dirname, "run-card.mjs").replaceAll("\\", "/");
+const runLongScript = path.resolve(__dirname, "run-long.mjs").replaceAll("\\", "/");
+const statsScript = path.resolve(__dirname, "stats.mjs").replaceAll("\\", "/");
 
 const tempRepo = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-repo-")).replaceAll("\\", "/");
 const tempLive = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-live-")).replaceAll("\\", "/");
@@ -607,11 +609,202 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 16) {
-    console.log("16/16 passed");
+  // Case Q (run-long): (a) --out = an existing temp dir, no --resume → exit 2 and no stream file; (b) a fresh
+  // --out path (not created), command echo hello → exit 0, exit file 0, stream contains hello; (c) fresh out,
+  // command sleep 8, --timeout-min 0.05 → exit file interrupted within 6 s.
+  {
+    const existingOutDir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-out-"));
+    const streamFileQ1 = path.join(tempLive, "run-case-q1.jsonl");
+    const resQ1 = spawnSync(process.execPath, [
+      runLongScript,
+      "--name", "case-q1",
+      "--out", existingOutDir,
+      "--", "echo", "hi"
+    ], { env: baseEnv, encoding: "utf8" });
+    assert.strictEqual(resQ1.status, 2, `Expected exit 2 for existing out dir without --resume, got ${resQ1.status}`);
+    assert.ok(!fs.existsSync(streamFileQ1), "stream file should not exist when exit 2");
+    fs.rmSync(existingOutDir, { recursive: true, force: true });
+
+    const freshOutDirQ2 = path.join(os.tmpdir(), `orch-test-fresh-out-${Date.now()}-q2`);
+    const streamFileQ2 = path.join(tempLive, "run-case-q2.jsonl");
+    const exitFileQ2 = path.join(tempLive, "run-case-q2.exit");
+    const resQ2 = spawnSync(process.execPath, [
+      runLongScript,
+      "--name", "case-q2",
+      "--out", freshOutDirQ2,
+      "--", "echo", "hello"
+    ], { env: baseEnv, encoding: "utf8" });
+    assert.strictEqual(resQ2.status, 0, `Expected exit 0 for run-long echo hello, got ${resQ2.status}: ${resQ2.stderr}`);
+    assert.ok(fs.existsSync(exitFileQ2), "exit file should exist");
+    assert.strictEqual(fs.readFileSync(exitFileQ2, "utf8").trim(), "0");
+    assert.ok(fs.existsSync(streamFileQ2), "stream file should exist");
+    assert.ok(fs.readFileSync(streamFileQ2, "utf8").includes("hello"), "stream should contain hello");
+
+    const freshOutDirQ3 = path.join(os.tmpdir(), `orch-test-fresh-out-${Date.now()}-q3`);
+    const exitFileQ3 = path.join(tempLive, "run-case-q3.exit");
+    const startQ3 = Date.now();
+    const resQ3 = spawnSync(process.execPath, [
+      runLongScript,
+      "--name", "case-q3",
+      "--out", freshOutDirQ3,
+      "--timeout-min", "0.05",
+      "--", "sleep", "8"
+    ], { env: baseEnv, encoding: "utf8" });
+    const elapsedQ3 = (Date.now() - startQ3) / 1000;
+    assert.strictEqual(resQ3.status, 0, `Expected exit 0 for run-long wrapper, got ${resQ3.status}: ${resQ3.stderr}`);
+    assert.ok(elapsedQ3 < 6.0, `Expected timeout within 6s, took ${elapsedQ3}s`);
+    assert.ok(fs.existsSync(exitFileQ3), "exit file should exist");
+    assert.strictEqual(fs.readFileSync(exitFileQ3, "utf8").trim(), "interrupted");
+    passedCount++;
+  }
+
+  // Case R (non-git): a temp folder (no git init) with a.txt, a card at docs/orch/t/card.md listing a.txt, b.txt;
+  // fake exec echo x > b.txt; echo 'STATUS: done', risk low → passed_no_review, touched = ["b.txt"]; then fake
+  // exec echo y > c.txt; echo 'STATUS: done' on a new name → out_of_scope with c.txt.
+  {
+    const nonGitRepo = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-nongit-")).replaceAll("\\", "/");
+    try {
+      fs.writeFileSync(path.join(nonGitRepo, "a.txt"), "hello a", "utf8");
+      const nonGitCardDir = path.join(nonGitRepo, "docs/orch/t");
+      fs.mkdirSync(nonGitCardDir, { recursive: true });
+      const nonGitCardPath = path.join(nonGitCardDir, "card.md").replaceAll("\\", "/");
+      const cardContentR = `# non-git-task — test non-git
+
+## Goal
+Test non-git folder in run-card.mjs.
+
+## Risk
+low
+
+## Files
+may change: \`a.txt\`, \`b.txt\` / read-only: \`docs/\`
+
+## Steps (N = 1)
+1. Step 1.
+
+## Check
+\`node -e "process.exit(0)"\`
+
+## Don't
+Run scripts in the foreground and wait
+Reuse existing functions
+No rm, no git push
+`;
+      fs.writeFileSync(nonGitCardPath, cardContentR, "utf8");
+
+      const envR1 = {
+        ...baseEnv,
+        ORCH_RUNNER_FAKE_EXEC: "echo x > b.txt; echo 'STATUS: done'"
+      };
+      delete envR1.ORCH_RUNNER_FAKE_REVIEW;
+
+      const resR1 = spawnSync(process.execPath, [
+        runCardScript,
+        "--card", nonGitCardPath,
+        "--name", "case-r1",
+        "--executor", "agy",
+        "--risk", "low",
+        "--repo", nonGitRepo
+      ], { env: envR1, encoding: "utf8" });
+
+      assert.strictEqual(resR1.status, 0, `Case R1 exit status was ${resR1.status}: ${resR1.stderr}`);
+      const stateR1 = readState("case-r1");
+      assert.strictEqual(stateR1.outcome, "passed_no_review");
+      assert.deepStrictEqual(stateR1.touched, ["b.txt"]);
+
+      const envR2 = {
+        ...baseEnv,
+        ORCH_RUNNER_FAKE_EXEC: "echo y > c.txt; echo 'STATUS: done'"
+      };
+      delete envR2.ORCH_RUNNER_FAKE_REVIEW;
+
+      const resR2 = spawnSync(process.execPath, [
+        runCardScript,
+        "--card", nonGitCardPath,
+        "--name", "case-r2",
+        "--executor", "agy",
+        "--risk", "low",
+        "--repo", nonGitRepo
+      ], { env: envR2, encoding: "utf8" });
+
+      assert.strictEqual(resR2.status, 0, `Case R2 exit status was ${resR2.status}: ${resR2.stderr}`);
+      const stateR2 = readState("case-r2");
+      assert.strictEqual(stateR2.outcome, "out_of_scope");
+      assert.ok(stateR2.outOfScope && stateR2.outOfScope.includes("c.txt"), `Expected c.txt in outOfScope, got ${stateR2.outOfScope}`);
+      passedCount++;
+    } finally {
+      fs.rmSync(nonGitRepo, { recursive: true, force: true });
+    }
+  }
+
+  // Case S (stats): write three state JSONs into a temp live dir's orch-runner/ (two agy/medium, one sol/high,
+  // with exec.seconds, outcome, ledger exec rows and one with fixes: [{n:1}]) → output has a line starting
+  // agy/medium containing cards 2 and fixes 1, a line starting sol/high containing cards 1, and total cards 3.
+  {
+    const statsLive = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-stats-live-")).replaceAll("\\", "/");
+    const statsStateDir = path.join(statsLive, "orch-runner");
+    fs.mkdirSync(statsStateDir, { recursive: true });
+
+    const state1 = {
+      name: "stats-1",
+      executor: "agy",
+      risk: "medium",
+      outcome: "review_pass",
+      exec: { seconds: 120 },
+      ledger: [{ role: "exec", fresh: 100000, cached: 500000, out: 10000 }],
+      fixes: [{ n: 1 }]
+    };
+    const state2 = {
+      name: "stats-2",
+      executor: "agy",
+      risk: "medium",
+      outcome: "review_fail",
+      exec: { seconds: 180 },
+      ledger: [{ role: "exec", fresh: 200000, cached: 600000, out: 20000 }],
+      fixes: []
+    };
+    const state3 = {
+      name: "stats-3",
+      executor: "sol",
+      risk: "high",
+      outcome: "review_pass",
+      exec: { seconds: 300 },
+      ledger: [{ role: "exec", fresh: 300000, cached: 800000, out: 30000 }],
+      fixes: []
+    };
+
+    fs.writeFileSync(path.join(statsStateDir, "stats-1.json"), JSON.stringify(state1), "utf8");
+    fs.writeFileSync(path.join(statsStateDir, "stats-2.json"), JSON.stringify(state2), "utf8");
+    fs.writeFileSync(path.join(statsStateDir, "stats-3.json"), JSON.stringify(state3), "utf8");
+
+    const statsRes = spawnSync(process.execPath, [statsScript], {
+      env: { ...process.env, ORCH_RUNNER_LIVE_DIR: statsLive },
+      encoding: "utf8"
+    });
+    assert.strictEqual(statsRes.status, 0, `Expected exit 0 for stats.mjs, got ${statsRes.status}: ${statsRes.stderr}`);
+    const statsOut = statsRes.stdout;
+    const lines = statsOut.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+
+    const agyMediumLine = lines.find((l) => l.startsWith("agy/medium"));
+    assert.ok(agyMediumLine, "Expected a line starting with agy/medium");
+    assert.ok(agyMediumLine.includes("cards 2"), "agy/medium line should contain 'cards 2'");
+    assert.ok(agyMediumLine.includes("fixes 1"), "agy/medium line should contain 'fixes 1'");
+
+    const solHighLine = lines.find((l) => l.startsWith("sol/high"));
+    assert.ok(solHighLine, "Expected a line starting with sol/high");
+    assert.ok(solHighLine.includes("cards 1"), "sol/high line should contain 'cards 1'");
+
+    assert.ok(lines.some((l) => l === "total cards 3"), "Output should contain 'total cards 3'");
+
+    fs.rmSync(statsLive, { recursive: true, force: true });
+    passedCount++;
+  }
+
+  if (passedCount === 19) {
+    console.log("19/19 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/16 passed`);
+    console.error(`Only ${passedCount}/19 passed`);
     process.exitCode = 1;
   }
 } finally {

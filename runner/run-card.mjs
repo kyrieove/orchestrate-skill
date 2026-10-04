@@ -4,8 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-
-const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
+import { q, runBash } from "./lib.mjs";
 
 function parseArgs(args) {
   const booleanFlags = new Set(["recon", "commit", "fresh"]);
@@ -149,6 +148,10 @@ if (args.commit) {
     state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
   } catch (err) {
     console.error("Failed to parse state file:", err);
+    process.exit(2);
+  }
+  if (state.git === false) {
+    console.error("not a git repository; nothing to commit");
     process.exit(2);
   }
   const repoAbs = state.repo;
@@ -357,12 +360,10 @@ if (cardAbs && !fs.existsSync(cardAbs)) {
 }
 
 const repoAbs = repo ? path.resolve(repo).replaceAll("\\", "/") : "";
+let isGit = false;
 if (repoAbs) {
   const gitCheck = spawnSync("git", ["-C", repoAbs, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
-  if (gitCheck.status !== 0 || gitCheck.stdout.trim() !== "true") {
-    console.error("Repo is not inside git work tree:", repoAbs);
-    process.exit(2);
-  }
+  isGit = gitCheck.status === 0 && gitCheck.stdout.trim() === "true";
 }
 
 const cardBytes = cardAbs ? fs.readFileSync(cardAbs) : Buffer.from("");
@@ -471,6 +472,7 @@ let baseDir = null;
 
 if (isFix) {
   state = existingState;
+  state.git = existingState.git !== undefined ? existingState.git : isGit;
   if (!state.rounds) state.rounds = [];
   if (state.rounds.length === 0) {
     state.rounds.push({ round: "1", ledger: state.ledger, touched: state.touched });
@@ -515,6 +517,7 @@ if (isFix) {
     executor,
     risk,
     repo: repoAbs,
+    git: isGit,
     check,
     mayChange,
     startedAt: new Date().toISOString(),
@@ -542,6 +545,36 @@ if (isFix) {
 
 // 3. Snapshot
 function snapshot() {
+  if (!isGit) {
+    const result = {};
+    function walk(dir) {
+      let entries;
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (entry.name === ".git" || entry.name === "node_modules") continue;
+        const fullPath = path.posix.join(dir, entry.name);
+        try {
+          if (entry.isDirectory()) {
+            walk(fullPath);
+          } else if (entry.isFile()) {
+            const st = fs.statSync(fullPath);
+            const rel = path.posix.relative(repoAbs, fullPath).replaceAll("\\", "/");
+            result[rel] = {
+              st: "",
+              hash: `${st.size}:${st.mtimeMs}`
+            };
+          }
+        } catch {}
+      }
+    }
+    walk(repoAbs);
+    return result;
+  }
+
   const res = spawnSync("git", ["-C", repoAbs, "status", "--porcelain=v1", "-z", "--untracked-files=all"], {
     encoding: "utf8",
     maxBuffer: 50 * 1024 * 1024
@@ -681,66 +714,17 @@ if (isFix) {
   }
 }
 
-function runBash(cmd, { cwd, timeoutMin, exitPath }) {
-  const startTime = Date.now();
-  const isWin = process.platform === "win32";
-  const child = spawn("bash", ["-c", cmd], {
-    cwd,
-    detached: !isWin,
-    stdio: "ignore"
-  });
-
-  let timedOut = false;
-  let timer = null;
-  if (timeoutMin && timeoutMin > 0) {
-    timer = setTimeout(() => {
-      timedOut = true;
-      if (isWin) {
-        spawnSync("taskkill", ["/T", "/F", "/PID", String(child.pid)]);
-      } else {
-        try { process.kill(-child.pid, "SIGKILL"); } catch {}
-      }
-    }, timeoutMin * 60 * 1000);
-  }
-
-  return new Promise((resolve) => {
-    child.on("close", (code, signal) => {
-      if (timer) clearTimeout(timer);
-      const seconds = (Date.now() - startTime) / 1000;
-      if (timedOut) {
-        if (exitPath) {
-          fs.writeFileSync(exitPath, "interrupted\n", "utf8");
-        }
-        resolve({ timedOut: true, exit: null, seconds });
-      } else {
-        const exitCode = code !== null ? code : 1;
-        if (exitPath) {
-          fs.writeFileSync(exitPath, `${exitCode}\n`, "utf8");
-        }
-        resolve({ timedOut: false, exit: exitCode, seconds });
-      }
-    });
-    child.on("error", (err) => {
-      if (timer) clearTimeout(timer);
-      const seconds = (Date.now() - startTime) / 1000;
-      if (exitPath) {
-        fs.writeFileSync(exitPath, "1\n", "utf8");
-      }
-      resolve({ timedOut: false, exit: 1, seconds, error: err });
-    });
-  });
-}
 
 // 4. Executor
 const progressPrefix = (executor === "agy" || process.env.ORCH_RUNNER_FAKE_EXEC) ? "agy" : "codex";
 const progressLine = `after starting, append \`0/N 已完成：无 · 正在：<第1步>\`, and after finishing each step append \`k/N 已完成：X · 正在：Y\` (Chinese; Y names the file / function and the action, 15–30 characters, e.g. \`2/5 已完成：读 README · 正在：在 README 的 Demo 前插入 Quota row 一节\`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to ${liveDir}/${progressPrefix}-${name}.progress. Just append; do not open, list or inspect that directory or any other file to learn the format.`;
 let execPrompt;
 if (isFix) {
-  execPrompt = `Read ${cardAbs} and carry out ## Fix ${fixRoundN} exactly; run only the commands it names; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. ${progressLine}`;
+  execPrompt = `Read ${cardAbs} and carry out ## Fix ${fixRoundN} exactly; run only the commands it names; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. Before replying, run a syntax-only check on every file you changed (e.g. node --check <file>, python -m py_compile <file>); this is not the Check. ${progressLine}`;
 } else if (recon) {
   execPrompt = `Read ${cardAbs} and answer what it asks. This is read-only: do not create, modify or delete any file; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then the answer. ${progressLine}`;
 } else {
-  execPrompt = `Read ${cardAbs} and carry out every step exactly; run only the commands the Steps name; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. ${progressLine}`;
+  execPrompt = `Read ${cardAbs} and carry out every step exactly; run only the commands the Steps name; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. Before replying, run a syntax-only check on every file you changed (e.g. node --check <file>, python -m py_compile <file>); this is not the Check. ${progressLine}`;
 }
 
 let S;
@@ -942,20 +926,27 @@ if (!state.outcome) {
     state.review = { model: reviewer, verdict: null };
     save(state);
 
-    const beforePathsList = Object.keys(state.before || {}).sort();
-    const beforePathsStr = beforePathsList.length > 0 ? beforePathsList.join(", ") : "none";
-    const reviewPrompt = `Review the working-tree changes against ${cardAbs}. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: ${beforePathsStr}. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each with file:line, the problem and the fix — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files.`;
+    let reviewPrompt;
+    if (isGit) {
+      const beforePathsList = Object.keys(state.before || {}).sort();
+      const beforePathsStr = beforePathsList.length > 0 ? beforePathsList.join(", ") : "none";
+      reviewPrompt = `Review the working-tree changes against ${cardAbs}. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: ${beforePathsStr}. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each with file:line, the problem and the fix — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files.`;
+    } else {
+      const touchedList = (state.touched || []).join(", ");
+      reviewPrompt = `Review the changes against ${cardAbs}. This folder is not a git repository; the task changed exactly these files: ${touchedList}. Read only those files and the card. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each with file:line, the problem and the fix — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files.`;
+    }
 
     const reviewStream = path.posix.join(liveDir, `codex-review-${name}.jsonl`);
     const reviewExit = path.posix.join(liveDir, `codex-review-${name}.exit`);
     const reviewMdAbs = path.resolve(repoAbs, taskDir, "review.md").replaceAll("\\", "/");
     fs.rmSync(reviewMdAbs, { force: true });
 
+    const skipGitFlag = isGit ? "" : " --skip-git-repo-check";
     let reviewCmd;
     if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
       reviewCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} > ${q(reviewStream)} 2>&1`;
     } else {
-      reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } > ${q(reviewStream)} 2>&1`;
+      reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } > ${q(reviewStream)} 2>&1`;
     }
 
     let reviewRes = await runBash(reviewCmd, { cwd: repoAbs, timeoutMin, exitPath: reviewExit });
@@ -974,7 +965,7 @@ if (!state.outcome) {
         if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
           retryCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} >> ${q(reviewStream)} 2>&1`;
         } else {
-          retryCmd = `{ echo '{"model":"${reviewer}"}'; codex exec -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } >> ${q(reviewStream)} 2>&1`;
+          retryCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } >> ${q(reviewStream)} 2>&1`;
         }
         state.review.retried = true;
         reviewRes = await runBash(retryCmd, { cwd: repoAbs, timeoutMin, exitPath: reviewExit });
@@ -1203,6 +1194,8 @@ if (isFix && fixDiffFile) {
   } else {
     lines.push("-");
   }
+} else if (!state.git) {
+  lines.push("diff: n/a (not git)");
 } else {
   const diffRes = spawnSync("git", ["-C", repoAbs, "diff", "--stat"], { encoding: "utf8" });
   let diffLast = "-";
