@@ -29,12 +29,7 @@ for (const file of files) {
   const risk = state.risk || "unknown";
   const groupKey = `${executor}/${risk}`;
 
-  let fixesCount = 0;
-  if (Array.isArray(state.fixes)) {
-    fixesCount = state.fixes.length;
-  } else if (typeof state.fixes === "number") {
-    fixesCount = state.fixes;
-  }
+  const fixesCount = Array.isArray(state.fixes) ? state.fixes.length : 0;
 
   const execSec = (state.exec && typeof state.exec.seconds === "number") ? state.exec.seconds : 0;
   const outcome = state.outcome || "unknown";

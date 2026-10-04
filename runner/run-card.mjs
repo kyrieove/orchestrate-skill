@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import crypto from "node:crypto";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { q, runBash } from "./lib.mjs";
 
@@ -167,28 +167,7 @@ if (args.commit) {
     process.exit(2);
   }
 
-  function getSectionNoDraft(text, title) {
-    const lines = text.split(/\r?\n/);
-    let inSection = false;
-    const sectionLines = [];
-    for (const line of lines) {
-      if (/^##\s+/.test(line)) {
-        if (inSection) break;
-        if (/^##\s+Acceptance\s+\(draft\)\s*$/i.test(line.trim())) continue;
-        const secTitle = line.replace(/^##\s+/, "").trim().split(/\s+/)[0];
-        if (secTitle.toLowerCase() === title.toLowerCase()) {
-          inSection = true;
-          continue;
-        }
-      }
-      if (inSection) {
-        sectionLines.push(line);
-      }
-    }
-    return inSection ? sectionLines.join("\n") : null;
-  }
-
-  const acceptanceSection = getSectionNoDraft(cardText, "Acceptance");
+  const acceptanceSection = getSection(cardText, "Acceptance");
   if (acceptanceSection === null) {
     console.error("There is no ## Acceptance section in card");
     process.exit(2);
@@ -200,9 +179,12 @@ if (args.commit) {
 
   const allTouched = state.allTouched || (state.rounds ? state.rounds.flatMap((r) => r.touched || []) : state.touched) || [];
   const mayChange = state.mayChange || [];
-  const stagedTouched = allTouched.filter((p) =>
+  const inScope = [...new Set(allTouched)].filter((p) =>
     mayChange.some((entry) => entry.endsWith("/") ? p.startsWith(entry) : p === entry)
   );
+  // A file created in one round and removed in a later one was never tracked: git add would fail on it.
+  const tracked = new Set(spawnSync("git", ["-C", repoAbs, "ls-files", "-z", "--", ...inScope], { encoding: "utf8" }).stdout.split("\0"));
+  const stagedTouched = inScope.filter((p) => tracked.has(p) || fs.existsSync(path.resolve(repoAbs, p)));
 
   const cardDirNorm = path.resolve(path.dirname(cardAbs)).replaceAll("\\", "/");
   let taskDir = path.posix.relative(repoAbs, cardDirNorm);
@@ -316,6 +298,16 @@ if (isFix) {
   } else {
     risk = existingState.risk;
   }
+
+  // --commit later uses the saved card and repo, so a fix must run on the same ones.
+  for (const [arg, saved] of [["card", existingState.card], ["repo", existingState.repo]]) {
+    if (typeof args[arg] === "string" && path.resolve(args[arg]).replaceAll("\\", "/") !== saved) {
+      console.error(`--${arg} does not match state '${saved}'`);
+      process.exit(2);
+    }
+  }
+  card = existingState.card;
+  repo = existingState.repo;
 } else if (!args.commit) {
   for (const req of ["card", "name", "executor", "risk", "repo"]) {
     if (typeof args[req] !== "string" || args[req].trim() === "") {
@@ -350,10 +342,6 @@ if (timeoutMinArg !== undefined) {
 }
 
 const cardAbs = card ? path.resolve(card).replaceAll("\\", "/") : "";
-if (!isFix && !args.commit && !cardAbs) {
-  console.error("Card argument missing");
-  process.exit(2);
-}
 if (cardAbs && !fs.existsSync(cardAbs)) {
   console.error("Card file does not exist:", cardAbs);
   process.exit(2);
@@ -455,7 +443,6 @@ for (const p of readOnlyRaw) {
 }
 
 // 2. State file
-fs.mkdirSync(stateDir, { recursive: true });
 
 const stateFile = path.posix.join(stateDir, `${name}.json`);
 const checkLog = path.posix.join(stateDir, `${name}.check.log`);
@@ -590,7 +577,7 @@ function snapshot() {
     const st = part.slice(0, 2);
     const p = part.slice(3).replaceAll("\\", "/");
     entries.push({ st, path: p });
-    if (st.startsWith("R") || st.startsWith("C")) {
+    if (/[RC]/.test(st)) {
       i++;
     }
   }
@@ -640,6 +627,8 @@ function statTree(paths) {
     for (const entry of entries) {
       if (entry.name === ".git") continue;
       const fullPath = path.posix.join(dir, entry.name);
+      // A listed ancestor must not pull in what the runner and executor write themselves.
+      if (fullPath === normLiveDir || fullPath === cardDirNorm) continue;
       try {
         if (entry.isDirectory()) {
           walk(fullPath);
@@ -743,7 +732,7 @@ if (process.env.ORCH_RUNNER_FAKE_EXEC) {
   execCmd = `C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p ${q(execPrompt)} --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format stream-json${convArg} > ${q(S)} 2>&1`;
 } else {
   const model = executor === "luna" ? "gpt-6-luna" : "gpt-6.1-sol";
-  execCmd = `{ echo '{"model":"${model}"}'; codex exec --approve-for-me -m ${model} -C ${q(repoAbs)} --json ${q(execPrompt)} < /dev/null; } > ${q(S)} 2>&1`;
+  execCmd = `{ echo '{"model":"${model}"}'; codex exec --approve-for-me${isGit ? "" : " --skip-git-repo-check"} -m ${model} -C ${q(repoAbs)} --json ${q(execPrompt)} < /dev/null; } > ${q(S)} 2>&1`;
 }
 
 const execResult = await runBash(execCmd, { cwd: repoAbs, timeoutMin, exitPath: E });
@@ -773,10 +762,7 @@ if (execResult.timedOut) {
       for (let i = lines.length - 1; i >= 0; i--) {
         try {
           const obj = JSON.parse(lines[i]);
-          if (obj.type === "item.completed" && obj.item?.type === "agent_message") {
-            reply = obj.item.text ?? "";
-            break;
-          } else if (obj.item?.type === "agent_message") {
+          if (obj.item?.type === "agent_message") {
             reply = obj.item.text ?? "";
             break;
           }
@@ -1019,6 +1005,8 @@ try {
 } catch {
   state.ledger = [];
 }
+// A fix runs no review: the review stream left from round 1 is not this round's cost.
+if (isFix) state.ledger = state.ledger.filter((row) => row.role !== "review");
 let fixDiffContent = "";
 let fixDiffFile = null;
 if (isFix) {
@@ -1065,11 +1053,11 @@ if (isFix) {
 }
 
 const k = (n) => `${Math.round(n / 1000)}k`;
-function formatLedgerLines(ledger) {
+function formatLedgerLines(ledger, sep = "\n") {
   if (!Array.isArray(ledger) || ledger.length === 0) return "n/a";
   return ledger
     .map((item) => `${item.role} ${item.model}: fresh ${k(item.fresh)}, cached ${k(item.cached)}, out ${k(item.out)}  (${item.file})`)
-    .join("\n");
+    .join(sep);
 }
 
 state.stage = "done";
@@ -1098,13 +1086,6 @@ if (draftOutcomes.has(state.outcome)) {
   }
   const cleanCardText = keptLines.join("\n").trimEnd();
 
-  function formatLedgerRow(ledger) {
-    if (!ledger || !ledger.length) return "n/a";
-    return ledger
-      .map((item) => `${item.role} ${item.model}: fresh ${k(item.fresh)}, cached ${k(item.cached)}, out ${k(item.out)}  (${item.file})`)
-      .join(" · ");
-  }
-
   const allTouched = state.allTouched || (state.rounds ? state.rounds.flatMap((r) => r.touched || []) : state.touched) || [];
   const allTouchedList = allTouched.length > 0 ? allTouched.join(", ") : "-";
   const checkExitVal = state.checkResult?.exit !== null && state.checkResult?.exit !== undefined ? state.checkResult.exit : 0;
@@ -1114,10 +1095,10 @@ if (draftOutcomes.has(state.outcome)) {
   if (state.rounds && state.rounds.length > 0) {
     for (const r of state.rounds) {
       const roundLabel = (r.round === "1" || r.round === "round 1") ? "round 1" : r.round;
-      tokenLines.push(`  - ${roundLabel}: ${formatLedgerRow(r.ledger)}`);
+      tokenLines.push(`  - ${roundLabel}: ${formatLedgerLines(r.ledger, " · ")}`);
     }
   } else {
-    tokenLines.push(`  - round 1: ${formatLedgerRow(state.ledger)}`);
+    tokenLines.push(`  - round 1: ${formatLedgerLines(state.ledger, " · ")}`);
   }
 
   const reviewerStr = state.review?.model || "no review";

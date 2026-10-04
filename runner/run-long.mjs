@@ -100,8 +100,13 @@ const minutes = (res.seconds / 60).toFixed(1);
 console.log(`RUN-LONG ${name} exit=${exitStr} ${minutes}m`);
 
 if (fs.existsSync(stream)) {
-  const content = fs.readFileSync(stream, "utf8");
-  const lines = content.split(/\r?\n/);
+  // Only the end of the log: a long run's stream can be far larger than memory allows.
+  const fd = fs.openSync(stream, "r");
+  const size = fs.fstatSync(fd).size;
+  const buf = Buffer.alloc(Math.min(size, 64 * 1024));
+  fs.readSync(fd, buf, 0, buf.length, size - buf.length);
+  fs.closeSync(fd);
+  const lines = buf.toString("utf8").split(/\r?\n/);
   if (lines.length > 0 && lines[lines.length - 1] === "") {
     lines.pop();
   }
