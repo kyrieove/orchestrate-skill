@@ -22,7 +22,7 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
   比内容（`git status` 看不出二次修改）；每张卡一个状态文件 `~/.claude/agent-live/orch-runner/<name>.json`；时间上限。4 已有（300k 换会话），5 以后。
 - SKILL.md 保留手动派发模板作后备；runner 验证通过后再改 SKILL.md 的 Flow / Commands。
 
-**进度**：卡 1 已验收（952eda2）；卡 2 `docs/orch/2026-10-05-run-card-2/` 已验收，首次用 run-card.mjs 自己派发，全程 1 次唤醒。下一步：写卡 3。
+**进度**：卡 1（952eda2）、卡 2（897bd78）、卡 3（63a6213，用 `run-card.mjs --commit` 提交）已验收。下一步：写卡 4。
 
 **后续卡（2026-10-05 定，run-card 验收后按顺序写卡派发）**
 - 卡 2 · 跑之前/跑当中（改 `run-card.mjs`）：
@@ -36,7 +36,7 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
      之后跑 Check 和越界检查，不再做一致性审查，摘要里直接附上修复的 diff；最多 2 轮。
   2. 自动起草 `## Acceptance`（结论、文件、check、`tokens:`、审查结论），Claude 只需要填 `review findings`。
   3. `--commit <name>`：只提交 `## Files` 里的文件 + card.md + review.md；项目有 `docs/review-log.md` 就追加一行。
-- 卡 4 · 独立小脚本：
+- 卡 4 · 独立小脚本（另加：执行者提示里要求交付前做廉价的语法自检，如 `node --check` / `python -m py_compile`，卡 3 agy 交了一个连加载都失败的文件）：
   1. `runner/run-long.mjs`：长计算启动器（输出目录已存在就停、tee 到 `run-<name>.jsonl`、写 `.exit`）。
   2. 非 git 目录：snapshot 改成比对文件列表 + 大小 + mtime。
   3. `runner/stats.mjs`：汇总 `orch-runner/*.json`，按执行者 × 风险统计结果、修复轮数、耗时、token，供攒够 10–15 张卡后调整 Modes 表。
