@@ -47,7 +47,8 @@ bugs in it.)
 ## Review — tiered by risk, same in every mode
 
 Three layers:
-1. **Check** — the card's Check command, run by the executor. Always.
+1. **Check** — the card's Check command, run by `run-card.mjs` after the executor exits (the executor only runs a
+   syntax self-check on what it changed; manual fallback: the executor runs the Check). Always.
 2. **Conformance review** — diff against the card (steps followed, no files outside the card, no copied
    code, no junk files). Done by a read-only codex session, never by Claude:
    medium risk → `gpt-6-luna`, high risk → `gpt-6.1-sol` (checking a diff against a card needs no top model; 2026-10-04
@@ -79,10 +80,101 @@ conformance review catches a wrong number; only an independent recompute does.
 
 1. **Read just enough.** `grep -n` / `sed -n 'a,bp'` on the code the change touches. For a large
    unfamiliar area, first send a read-only recon card ("summarise X: functions, call sites, data
-   flow, ≤ 40 lines") and plan from its summary.
+   flow, ≤ 40 lines", dispatched with `--recon`) and plan from its summary.
 2. **Write the card** — `docs/orch/<yyyy-mm-dd>-<name>/card.md` in the project (sections below).
    One task per card. Show the user the card before dispatching when it writes to data folders or
    does anything irreversible; otherwise dispatch.
+3. **Dispatch through the runner** — one background Bash (`run_in_background`, `timeout` 7200000, cwd = repo), no heartbeat:
+   ```bash
+   node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl
+   ```
+   Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
+   command. The runner lints the card (exit 2 lists every problem; nothing has started), snapshots git status + content
+   hashes, runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
+   runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
+   prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
+   change is out of scope. `--timeout-min` (default 100, the Bash job dies at 120). Not a git repo: works on a
+   size/mtime snapshot; `--commit` refuses. State: `~/.claude/agent-live/orch-runner/<name>.json`.
+   **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
+   run in the background with `node ~/.claude/skills/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`
+   (refuses an existing output dir unless `--resume`; default timeout 110 min; split longer runs into resumable parts;
+   a waiting executor re-reads its context on every poll — agy on v16, 2026-10-04: 7.6 M fresh + 22 M cached).
+4. **Read the summary** (its first line is `ORCH-RUNNER <name> outcome=<outcome>`):
+
+   | outcome | next |
+   |---|---|
+   | `review_pass`, `passed_no_review`, `recon_done` | step 6 (low risk: also glance at `diff --stat`) |
+   | `review_fail` | check each finding at its `file:line`, then step 5 |
+   | `check_failed` | the summary has the Check's tail; step 5 |
+   | `out_of_scope` | 🛑 show the files, the user decides (never auto-revert); `junk:` paths are deleted only after the user says so in one line |
+   | `readonly_violated` | 🛑 show the changed read-only paths to the user |
+   | `blocked`, `failed`, `interrupted` | read the reply / stream tail; executor failures follow **Executor fails** above |
+   | `review_error` | reviewer exited non-zero (quota?) or gave no VERDICT twice: **Reviewer out of quota** above |
+5. **Fix.** A real finding whose fix is a few mechanical lines (a missing check, a wrong regex, a duplicate
+   declaration): Claude fixes it directly, re-runs the Check, and says so in Acceptance — an executor fix round costs
+   ~0.3 M fresh + 3 M cached tokens (2026-10-05). Anything larger: append `## Fix N` to the card (exact steps), then
+   `node ~/.claude/skills/orchestrate/runner/run-card.mjs --fix N --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
+   It runs the executor (agy continues its conversation; `--fresh` starts a new one — compare the ledger rows),
+   read-only guard, files check and Check, no second conformance review; the summary carries the fix diff, which is
+   all Claude reads. High risk: recompute the key number again. Max 2 fixes, then a new card in `<task>-v2/`.
+6. **Accept.** Turn `## Acceptance (draft)` into `## Acceptance`: replace the `TODO`s (verdict: accepted / review
+   pending / rejected; `review findings: N real / M false positive / K missed`, with tier and reviewer; recompute result
+   for high risk); the files, Check and `tokens:` lines are already filled in. Then
+   `node ~/.claude/skills/orchestrate/runner/run-card.mjs --commit --name <name> --message "<msg>"` — it stages only the
+   card's files + card.md + review.md (and appends to `docs/review-log.md` when the project has one), commits, prints the
+   hash; **don't push**. Commit messages end with the attribution lines the session asks for.
+   When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
+   with where it was found and the fix commit, then commit the card. After 10–15 cards, change the Modes table from
+   `node ~/.claude/skills/orchestrate/runner/stats.mjs` and the Acceptance rows, not from impressions (user, 2026-10-04).
+   Analysis logs follow the project's CLAUDE.md rules.
+
+## Card sections (`card.md`)
+
+```markdown
+# <name> — <one-line goal>
+## Goal        what is true when done, in observable terms
+## Risk        low / medium / high (+ the key number Claude will recompute, for high); the first word must equal --risk
+## Parameters  every value the result depends on, with its expected value — analysis settings (windows, N,
+               exclusions, K range, weights, seeds), thresholds, paths, constants, config keys. The code asserts
+               each one; the reviewer checks them one by one. Omit only when nothing in the task has a value.
+## Files       may change: `a.py`, `dir/` … / read-only: `data/` … — every path in backticks (the runner reads them:
+               may-change paths bound the files check; read-only paths get a size/mtime guard). Data folders always read-only.
+## Steps (N = k)  numbered 1..N, the total in the heading; per step: file → function → the exact behaviour change; code snippets
+               for anything fiddly (index math, time axes, regexes, API calls the executor may get wrong)
+               When a step adds a check or invariant, list every path that can bypass it (cache hit, early
+               return, fallback, retry) and say how each one is covered. (2026-10-01: 2 of 6 cards failed
+               review because a cache hit returned before the new check.)
+## Check       one command in backticks (or a fenced block), the fastest existing test that proves the goal; add ONE small new test
+               only for a bug with a crisp repro, and spell it out here
+## Don't       no commits, no other files, no refactors beyond the steps, reuse helper X instead of copying; and always:
+               "Run scripts in the foreground and wait; before replying, stop any background task still running."
+               "Reuse existing functions; don't copy existing logic." "No rm, no git push, no git checkout . / restore . / reset --hard."
+```
+
+Later sections appended in the same file: `## Fix 1`, `## Fix 2`, `## Acceptance`. Each task folder
+holds only `card.md` and `review.md`. The runner refuses a card missing Goal / Risk / Files / Check / Steps (N = k) /
+Don't or the three quoted Don't sentences (recon cards may omit Check).
+
+### Research data outside git (input read-only, output isolated)
+
+When the task reads raw data or writes results into an untracked folder, the card must also say:
+- raw data directories are read-only: no delete, move, rename or in-place overwrite;
+- the output directory must not exist at the first start; if it does, stop — never clear or reuse it. A resume
+  reuses it only after the script checks its own saved run parameters (e.g. `run_params.json`) match;
+- temp files, logs and results all stay in the output directory;
+- compare the raw-file list, sizes and mtimes before and after; any difference = failure, stop;
+- **checkpoint / resume** (user's hard requirement, 2026-09-24): any script expected to run > 10 min
+  saves results in batches, skips finished batches on restart, skips if the final output exists; each
+  batch's seed depends only on its batch number so a resumed run is bit-identical to an uninterrupted
+  one; prove it with a small trial (run straight through vs stop once and resume). Batch size: an
+  interruption loses at most ~10 min.
+- fix rounds may modify only files this task created in that output directory; replaced results are
+  renamed with suffix `_SUPERSEDED_<reason>`, not deleted, and the report gets a version line on top.
+
+## Manual fallback (runner missing or broken)
+
+Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
+
 3. **Snapshot.** Save `git status --short` as *before* (outside git: the file list with sizes and mtimes
    of the folders the card may touch). Existing changes belong to the
    user — the executor must not overwrite them.
@@ -115,48 +207,7 @@ conformance review catches a wrong number; only an independent recompute does.
    If the project keeps a code log (e.g. `docs/review-log.md`), add one line pointing at the card. Analysis logs follow the
    project's CLAUDE.md rules.
 
-## Card sections (`card.md`)
-
-```markdown
-# <name> — <one-line goal>
-## Goal        what is true when done, in observable terms
-## Risk        low / medium / high (+ the key number Claude will recompute, for high)
-## Parameters  every value the result depends on, with its expected value — analysis settings (windows, N,
-               exclusions, K range, weights, seeds), thresholds, paths, constants, config keys. The code asserts
-               each one; the reviewer checks them one by one. Omit only when nothing in the task has a value.
-## Files       may change: … / read-only: … (data folders always read-only)
-## Steps       numbered 1..N and state the total N; per step: file → function → the exact behaviour change; code snippets
-               for anything fiddly (index math, time axes, regexes, API calls the executor may get wrong)
-               When a step adds a check or invariant, list every path that can bypass it (cache hit, early
-               return, fallback, retry) and say how each one is covered. (2026-10-01: 2 of 6 cards failed
-               review because a cache hit returned before the new check.)
-## Check       one command, the fastest existing test that proves the goal; add ONE small new test
-               only for a bug with a crisp repro, and spell it out here
-## Don't       no commits, no other files, no refactors beyond the steps, reuse helper X instead of copying; and always:
-               "Run scripts in the foreground and wait; before replying, stop any background task still running."
-               "Reuse existing functions; don't copy existing logic." "No rm, no git push, no git checkout . / restore . / reset --hard."
-```
-
-Later sections appended in the same file: `## Fix 1`, `## Fix 2`, `## Acceptance`. Each task folder
-holds only `card.md` and `review.md`.
-
-### Research data outside git (input read-only, output isolated)
-
-When the task reads raw data or writes results into an untracked folder, the card must also say:
-- raw data directories are read-only: no delete, move, rename or in-place overwrite;
-- the output directory must not exist at the first start; if it does, stop — never clear or reuse it. A resume
-  reuses it only after the script checks its own saved run parameters (e.g. `run_params.json`) match;
-- temp files, logs and results all stay in the output directory;
-- compare the raw-file list, sizes and mtimes before and after; any difference = failure, stop;
-- **checkpoint / resume** (user's hard requirement, 2026-09-24): any script expected to run > 10 min
-  saves results in batches, skips finished batches on restart, skips if the final output exists; each
-  batch's seed depends only on its batch number so a resumed run is bit-identical to an uninterrupted
-  one; prove it with a small trial (run straight through vs stop once and resume). Batch size: an
-  interruption loses at most ~10 min.
-- fix rounds may modify only files this task created in that output directory; replaced results are
-  renamed with suffix `_SUPERSEDED_<reason>`, not deleted, and the report gets a version line on top.
-
-## Commands
+## Commands (manual fallback)
 
 Run `mkdir -p ~/.claude/agent-live` once first. Before every dispatch create `T=$(mktemp -d)` (used by the
 commands). Only at a card's first dispatch, clear same-name leftovers:
