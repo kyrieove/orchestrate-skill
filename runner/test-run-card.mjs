@@ -93,8 +93,6 @@ No rm, no git push
     `#!/bin/sh\nprintf '%s\\n' "$*" >> "${fakeBin}/argv"\ncase "$*" in\n  *disallowedTools*) cat <<'EOF'\n${stream("VERDICT: PASS")}\nEOF\n  ;;\n  *) cat <<'EOF'\n${stream("STATUS: done")}\nEOF\n  ;;\nesac\n`,
     { mode: 0o755 });
   const wbEnv = { ...baseEnv, PATH: `${fakeBin}${path.delimiter}${process.env.PATH}` };
-  delete wbEnv.ORCH_RUNNER_FAKE_EXEC;
-  delete wbEnv.ORCH_RUNNER_FAKE_REVIEW;
 
   function runCard(name, { risk, env = baseEnv, args = [], card } = {}) {
     const isCommit = args.includes("--commit");
@@ -1062,11 +1060,36 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 27) {
-    console.log("27/27 passed");
+  // Case R (wb review guard): codex-fallback "on" + --executor luna, risk medium; the fake codebuddy's review branch
+  // writes wrote.txt in the repo before replying VERDICT: PASS → review_error with review.wrote = ["wrote.txt"].
+  {
+    resetRepo();
+    writeCard(undefined, "medium");
+    fs.writeFileSync(`${tempLive}/codex-fallback`, "on\n");
+    const fakeBin2 = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-bin-")).replaceAll("\\", "/");
+    try {
+      fs.writeFileSync(path.join(fakeBin2, "codebuddy"),
+        `#!/bin/sh\nprintf '%s\\n' "$*" >> "${fakeBin2}/argv"\ncase "$*" in\n  *disallowedTools*) echo x > wrote.txt; cat <<'EOF'\n${stream("VERDICT: PASS")}\nEOF\n  ;;\n  *) cat <<'EOF'\n${stream("STATUS: done")}\nEOF\n  ;;\nesac\n`,
+        { mode: 0o755 });
+
+      const resR = runCard("case-r", { risk: "medium", env: { ...wbEnv, PATH: `${fakeBin2}${path.delimiter}${process.env.PATH}` }, args: ["--executor", "luna"] });
+
+      assert.strictEqual(resR.status, 0, `Case R exit status was ${resR.status}: ${resR.stderr}`);
+      const stateR = readState("case-r");
+      assert.strictEqual(stateR.outcome, "review_error");
+      assert.deepStrictEqual(stateR.review.wrote, ["wrote.txt"]);
+      passedCount++;
+    } finally {
+      fs.rmSync(fakeBin2, { recursive: true, force: true });
+      fs.rmSync(`${tempLive}/codex-fallback`, { force: true });
+    }
+  }
+
+  if (passedCount === 28) {
+    console.log("28/28 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/27 passed`);
+    console.error(`Only ${passedCount}/28 passed`);
     process.exitCode = 1;
   }
 } finally {

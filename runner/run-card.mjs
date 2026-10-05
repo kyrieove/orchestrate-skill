@@ -339,8 +339,8 @@ if (isFix) {
   for (const p of basePaths) {
     const src = path.resolve(repoAbs, p);
     const dest = path.resolve(baseDir, p);
-    if (fs.existsSync(src) && fs.statSync(src).isFile()) {
-      const st = fs.statSync(src);
+    const st = fs.existsSync(src) ? fs.statSync(src) : null;
+    if (st?.isFile()) {
       if (ignored.has(p) || st.size > MAX_BASE_BYTES) {
         stats[p] = { size: st.size, mtimeMs: st.mtimeMs };
         continue;
@@ -602,7 +602,7 @@ if (isFix) {
     const nowSize = exists ? fs.statSync(repoFile).size : null;
     const nowMtime = exists ? fs.statSync(repoFile).mtimeMs : null;
     if (!exists || nowSize !== rec.size || nowMtime !== rec.mtimeMs) {
-      const before = rec.size ?? "-";
+      const before = rec.size;
       const after = exists ? nowSize : "-";
       diffPieces.push(`# large or ignored file changed (not diffed): ${p} (size ${before} → ${after} bytes)\n`);
     }

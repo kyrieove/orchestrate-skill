@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { q, runBash, wbCmd, WB_MODEL, codexFallback } from "./lib.mjs";
+import { snapshot } from "./snapshot.mjs";
 
 export async function runReview(ctx) {
   const {
@@ -32,6 +33,7 @@ export async function runReview(ctx) {
 
   const wb = codexFallback();
   if (wb) reviewer = WB_MODEL;
+  const preReview = wb ? snapshot(repoAbs, isGit) : null;
   state.review = { model: reviewer, verdict: null };
   save(state);
 
@@ -117,6 +119,19 @@ export async function runReview(ctx) {
     if (attempt === 1) {
       state.outcome = "review_error";
       state.review.verdict = firstLine || "error";
+      save(state);
+    }
+  }
+
+  if (preReview) {
+    const post = snapshot(repoAbs, isGit);
+    const own = path.posix.join(taskDir, "review.md").replaceAll("\\", "/");
+    const wrote = [...new Set([...Object.keys(preReview), ...Object.keys(post)])]
+      .filter((p) => p !== own && JSON.stringify(preReview[p]) !== JSON.stringify(post[p])).sort();
+    if (wrote.length) {
+      state.outcome = "review_error";
+      state.review.verdict = "error";
+      state.review.wrote = wrote;
       save(state);
     }
   }
