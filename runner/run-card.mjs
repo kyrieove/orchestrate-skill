@@ -4,7 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { q, runBash } from "./lib.mjs";
+import { q, runBash, codexFallback } from "./lib.mjs";
 import { parseArgs, getSection, lintCard, isJunkPath } from "./card.mjs";
 import { snapshot, statTree, getReadOnlyDiff } from "./snapshot.mjs";
 import { runCommit } from "./commit.mjs";
@@ -119,6 +119,29 @@ if (isFix) {
 if (args.reviewer !== undefined && !["luna", "sol"].includes(args.reviewer)) {
   console.error("Invalid reviewer:", args.reviewer);
   process.exit(2);
+}
+
+// Refuse to start a card that needs codex while codex's quota is used up. A missing or failing quota script never blocks.
+const needsCodex = !args.commit && !codexFallback() && (["luna", "sol"].includes(executor) || (!isFix && !recon && risk !== "low"));
+if (needsCodex) {
+  const quotaScript = process.env.ORCH_QUOTA_SCRIPT || "D:/2/dev/token-weather-quotas/hooks/quota.mjs";
+  if (fs.existsSync(quotaScript)) {
+    try {
+      const quotaRes = spawnSync(process.execPath, [quotaScript], { encoding: "utf8", timeout: 45000 });
+      if (quotaRes.status === 0) {
+        const quota = JSON.parse(quotaRes.stdout);
+        const five = quota.codex?.five ?? null;
+        const week = quota.codex?.week ?? null;
+        const fiveFull = five !== null && five.pct >= 100;
+        const weekFull = week !== null && week.pct >= 100;
+        if (fiveFull || weekFull) {
+          const when = new Date((fiveFull ? five : week).resetMs).toLocaleString("zh-CN", { hour12: false });
+          console.error(`codex quota used up (5h ${five?.pct ?? "-"}%, 7d ${week?.pct ?? "-"}%, resets ${when}): ask the user whether to switch codex to wb (SKILL.md "Codex → wb switch")`);
+          process.exit(2);
+        }
+      }
+    } catch {}
+  }
 }
 
 let timeoutMin = 100;

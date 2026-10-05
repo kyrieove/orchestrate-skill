@@ -79,7 +79,8 @@ No rm, no git push
   const baseEnv = {
     ...process.env,
     ORCH_RUNNER_LIVE_DIR: tempLive,
-    ORCH_CODEX_FALLBACK_FILE: `${tempLive}/codex-fallback`
+    ORCH_CODEX_FALLBACK_FILE: `${tempLive}/codex-fallback`,
+    ORCH_QUOTA_SCRIPT: `${tempLive}/no-quota.mjs`
   };
 
   fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-bin-")).replaceAll("\\", "/");
@@ -1030,11 +1031,42 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 26) {
-    console.log("26/26 passed");
+  // Case Q (quota precheck): a medium-risk card with the fake quota script reporting the 5h window full → exit 2 and
+  // the switch line, no state file; with the switch on the precheck is skipped and the medium case runs the fake review.
+  {
+    resetRepo();
+    writeCard(undefined, "medium");
+    fs.writeFileSync(`${tempLive}/quota-full.mjs`, 'console.log(JSON.stringify({ codex: { five: { pct: 100, resetMs: Date.now() + 3600000 }, week: { pct: 40, resetMs: Date.now() + 86400000 } } }))', "utf8");
+    const env = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md",
+      ORCH_QUOTA_SCRIPT: `${tempLive}/quota-full.mjs`
+    };
+
+    const res = runCard("case-q", { risk: "medium", env });
+
+    assert.strictEqual(res.status, 2, `Case Q exit status was ${res.status}: ${res.stderr}`);
+    assert.ok(res.stderr.includes("codex quota used up (5h 100%, 7d 40%"), `Case Q stderr should carry the quota line: ${res.stderr}`);
+    assert.ok(res.stderr.includes("switch codex to wb"), `Case Q stderr should mention the switch: ${res.stderr}`);
+    const stateFileQ = path.join(tempLive, "orch-runner", "case-q.json");
+    assert.strictEqual(fs.existsSync(stateFileQ), false, "State file must not exist for case-q");
+
+    const fallbackFile = `${tempLive}/quota-fallback-on`;
+    fs.writeFileSync(fallbackFile, "on\n", "utf8");
+    const env2 = { ...env, ORCH_CODEX_FALLBACK_FILE: fallbackFile };
+    const res2 = runCard("case-q2", { risk: "medium", env: env2 });
+
+    assert.strictEqual(res2.status, 0, `Case Q2 exit status was ${res2.status}: ${res2.stderr}`);
+    fs.rmSync(fallbackFile, { force: true });
+    passedCount++;
+  }
+
+  if (passedCount === 27) {
+    console.log("27/27 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/26 passed`);
+    console.error(`Only ${passedCount}/27 passed`);
     process.exitCode = 1;
   }
 } finally {
