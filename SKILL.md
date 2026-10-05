@@ -29,10 +29,11 @@ executing the Cartool port, against 0.2–0.3 M for a typical agy card.
 | `/sol` | codex `gpt-6.1-sol` | fixed |
 | `/wb` | CodeBuddy CLI (WorkBuddy account) `deepseek-v4.1-flash` high | fixed |
 
-**Codex → wb switch** (manual, user 2026-10-05): while `~/.claude/skills/orchestrate/codex-fallback` reads `on`
-(Token Weather's `codex→wb` button toggles it), the runner sends every codex place — luna, sol and every review —
-to wb on `deepseek-v4.1-flash`; agy is unaffected. Always flash, never another DeepSeek model (user). Codex
-unreachable or out of quota → tell the user they can turn the switch on; never turn it on yourself.
+**Codex → wb switch** (manual, user 2026-10-05): while `~/.claude/skills/orchestrate/codex-fallback` reads `on`,
+the runner sends every codex place — luna, sol and every review — to wb on `deepseek-v4.1-flash`; agy is
+unaffected. Always flash, never another DeepSeek model (user). Codex unreachable or out of quota → stop, tell the
+user and ask in one line whether to switch codex to wb. Only when the user says so in chat (e.g. "codex 换 wb" /
+"切回 codex"), write `on` / `off` to that file and say which it is now; never switch on your own.
 
 Natural language: naming one executor ("让 / 交给 / 只让 agy|luna|sol|wb 干") → that fixed mode; "交给 codex"
 without a model → `/orch`, choosing luna; plain 派活 / 分工 / 编排 → `/orch`. A slash
