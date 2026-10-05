@@ -4,6 +4,18 @@
 Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.claude` 里面的路径每次编辑都要确认）。
 旧副本备份在 `~/.claude/_archive/2026-10-05/orchestrate`。
 
+## 2026-10-05 晚（最新，新会话先读）
+
+- 新执行者 `wb`：CodeBuddy CLI（`npm i -g @tencent-ai/codebuddy-code`，已登录），`deepseek-v4.1-flash` + `--effort high`；
+  `/wb` 命令；`/orch` 每次先问「写代码交给 agy 还是 wb」。用户规定 DeepSeek 一律用 flash。
+- codex→wb 开关：文件 `codex-fallback`，`on` = luna/sol/审查都走 wb。**现在是 `on`**；只在用户说「切回 codex」时改 `off`。
+- runner 新增：派活前 codex 额度预检（满了 exit 2）；`--fix` 大文件/忽略文件只记 size+mtime；wb 审查改动仓库 → `review_error`。
+  测试 `node runner/test-run-card.mjs` → `28/28 passed`（假 codebuddy 覆盖 wb 执行和审查）。
+- 下一步：codex 恢复后用 sol 整体复审 `674d8a2..HEAD`（今天的审查都由 wb 自己做）；
+  `ledger.mjs` 读不出 CodeBuddy usage（wb 行显示 0k），用户说先不管。
+- 坑：wb 做审查时容易跑去翻 `agent-live/`，审查卡要写「只读 diff 和点名文件」；Token Weather 源码在
+  `D:/2/dev/token-weather-quotas`（不是 plugins/cache 那份）。
+
 ## 进行中：orch-runner（脚本辅助 orchestrate，省 Claude token）
 
 **目的**：orchestrate 仍是大脑（选执行者、定风险、写卡、验收）；runner 接管中间的机械步骤，
