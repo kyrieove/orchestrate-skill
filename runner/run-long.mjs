@@ -80,8 +80,8 @@ const exitPath = path.posix.join(liveDir, `run-${name}.exit`);
 if (!resume) {
   fs.rmSync(stream, { force: true });
   fs.rmSync(progressFile, { force: true });
-  fs.rmSync(exitPath, { force: true });
 }
+fs.rmSync(exitPath, { force: true });
 
 const redir = resume ? ">>" : ">";
 const bashCmd = `{\n${command}\n} ${redir} ${q(stream)} 2>&1`;
