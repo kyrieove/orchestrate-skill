@@ -102,7 +102,7 @@ if (isFix) {
     process.exit(2);
   }
 
-  if (!["agy", "luna", "sol"].includes(executor)) {
+  if (!["agy", "luna", "sol", "wb"].includes(executor)) {
     console.error("Invalid executor:", executor);
     process.exit(2);
   }

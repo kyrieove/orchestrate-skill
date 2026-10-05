@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { q, runBash } from "./lib.mjs";
+import { q, runBash, wbCmd, WB_MODEL, codexFallback } from "./lib.mjs";
 
 export async function runReview(ctx) {
   const {
@@ -30,6 +30,8 @@ export async function runReview(ctx) {
     reviewer = "gpt-6-luna";
   }
 
+  const wb = codexFallback();
+  if (wb) reviewer = WB_MODEL;
   state.review = { model: reviewer, verdict: null };
   save(state);
 
@@ -66,6 +68,8 @@ export async function runReview(ctx) {
     let reviewCmd;
     if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
       reviewCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} ${redir} ${q(reviewStream)} 2>&1`;
+    } else if (wb) {
+      reviewCmd = `{ echo '{"model":"${reviewer}"}'; ${wbCmd(reviewPrompt, " --disallowedTools Write,Edit,NotebookEdit --output-format text")} < /dev/null > ${q(reviewMdAbs)}; } ${redir} ${q(reviewStream)} 2>&1`;
     } else {
       reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } ${redir} ${q(reviewStream)} 2>&1`;
     }

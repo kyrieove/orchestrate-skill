@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: Claude plans and accepts; agy or codex executes a detailed task card; review is tiered by risk. Four commands — /orch (Claude picks the executor), /agy, /luna, /sol (fixed executor). Use whenever the user says Claude should plan/review but not implement, says 分工, 派活, 编排, orchestrate, /orch, /agy, /luna, /sol, 让 agy 干, 让 luna 干, 让 sol 干, 交给 agy/codex, or starts a feature, fix, refactor, analysis or batch job in a project whose HANDOFF.md says "Claude plans and reviews".
+description: Claude plans and accepts; agy or codex executes a detailed task card; review is tiered by risk. Five commands — /orch (Claude picks the executor), /agy, /luna, /sol, /wb (fixed executor). Use whenever the user says Claude should plan/review but not implement, says 分工, 派活, 编排, orchestrate, /orch, /agy, /luna, /sol, /wb, 让 agy 干, 让 wb 干, 让 luna 干, 让 sol 干, 交给 agy/codex, or starts a feature, fix, refactor, analysis or batch job in a project whose HANDOFF.md says "Claude plans and reviews".
 ---
 
 # orchestrate — Claude is the brain, agy and codex are the hands
@@ -27,15 +27,21 @@ executing the Cartool port, against 0.2–0.3 M for a typical agy card.
 | `/agy` | agy | fixed |
 | `/luna` | codex `gpt-6-luna` | fixed |
 | `/sol` | codex `gpt-6.1-sol` | fixed |
+| `/wb` | CodeBuddy CLI (WorkBuddy account) `deepseek-v4.1-flash` high | fixed |
 
-Natural language: naming one executor ("让 / 交给 / 只让 agy|luna|sol 干") → that fixed mode; "交给 codex"
+**Codex → wb switch** (manual, user 2026-10-05): while `~/.claude/skills/orchestrate/codex-fallback` reads `on`
+(Token Weather's `codex→wb` button toggles it), the runner sends every codex place — luna, sol and every review —
+to wb on `deepseek-v4.1-flash`; agy is unaffected. Always flash, never another DeepSeek model (user). Codex
+unreachable or out of quota → tell the user they can turn the switch on; never turn it on yourself.
+
+Natural language: naming one executor ("让 / 交给 / 只让 agy|luna|sol|wb 干") → that fixed mode; "交给 codex"
 without a model → `/orch`, choosing luna; plain 派活 / 分工 / 编排 → `/orch`. A slash
 command beats wording inside its arguments (say so in one line if they conflict). Empty arguments → the
 task in progress; none → ask in one line. luna and sol need no permission prompt (user, 2026-10-01); any
 other codex model → ask, stating the concrete job. agy's model is fixed.
 
 **Executor fails** (agy 429 / RESOURCE_EXHAUSTED / quota text, codex unreachable):
-- fixed modes (`/agy`, `/luna`, `/sol`) → stop and tell the user; never switch executor on your own.
+- fixed modes (`/agy`, `/luna`, `/sol`, `/wb`) → stop and tell the user; never switch executor on your own.
 - `/orch` → ask the user which other executor to use, naming the job. Claude still doesn't implement.
 
 **Reviewer out of quota** → do not replace the conformance review with a Claude line-by-line read. Accept
@@ -90,7 +96,7 @@ conformance review catches a wrong number; only an independent recompute does.
    does anything irreversible; otherwise dispatch.
 3. **Dispatch through the runner** — one background Bash (`run_in_background`, `timeout` 7200000, cwd = repo), no heartbeat:
    ```bash
-   node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl
+   node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl
    ```
    Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
    command. The runner lints the card (exit 2 lists every problem; nothing has started), snapshots git status + content

@@ -3,6 +3,16 @@ import { spawn, spawnSync } from "node:child_process";
 
 export const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
 
+// wb = CodeBuddy CLI (WorkBuddy account) on DeepSeek v4.1 flash; replies end in a {"type":"result"} line.
+export const WB_MODEL = "deepseek-v4.1-flash";
+export const wbCmd = (prompt, extra = "") => `codebuddy -p ${q(prompt)} --model ${WB_MODEL} --effort high -y${extra}`;
+
+// Token Weather's WB button writes "on" here; while on, codex's places (luna, sol, review) go to wb.
+export const CODEX_FALLBACK_FILE = "C:/Users/ASUS/.claude/skills/orchestrate/codex-fallback";
+export function codexFallback() {
+  try { return fs.readFileSync(CODEX_FALLBACK_FILE, "utf8").trim() === "on"; } catch { return false; }
+}
+
 export function runBash(cmd, { cwd, timeoutMin, exitPath }) {
   const startTime = Date.now();
   const isWin = process.platform === "win32";
