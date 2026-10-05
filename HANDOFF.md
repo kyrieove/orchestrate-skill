@@ -32,10 +32,10 @@ run-card.mjs 仍有 677 行（目标 600），剩下是参数/状态初始化和
    （卡 6 只好手动提交，state 里没记 commit）。先查：runner 起 git 时传下去的环境变量（GIT_* / ORCH_RUNNER_*）是否漏进测试的子进程。
 2. token 实测：卡 6 的 Fix 1 续 agy 会话，fresh 799k，比第 1 轮整卡（fresh 335k）还多，只是删 ~40 行。下一个修复轮用 `--fresh` 跑，对比后决定 SKILL.md 默认续会话还是新会话。
 3. 若要继续缩：把参数校验 + 状态初始化挪到 `runner/setup.mjs`、摘要打印挪到 `runner/summary.mjs`。
+4. 卡 6 算 runner 模块第 6 张卡：按 retro 规则该跑一次 sol 整仓 audit（`/rv` 整体），回填 K missed。
 5. 精简（2026-10-05）：执行者提示词加了 lean 一句（复用 > stdlib，不加抽象，回复只给 STATUS + 文件）；审查提示词加列臃肿项（不单独判 FAIL）。
    agy 全局规则去重：同一份 13KB 规则原有 5 份、加载 3 次，现只留 `~/.gemini/config/rules/GEMINI.md`（其余在 `~/.claude/_archive/2026-10-05/gemini-rules-dedup`；
    `codex-productivity-tools` 插件更新可能放回它那份）。下一张卡对比 agy token 和 diff 行数看效果。不做：MCP 包装 runner（不省 token）、agy 自审轮（贵且同模型看不出）。
-4. 卡 6 算 runner 模块第 6 张卡：按 retro 规则该跑一次 sol 整仓 audit（`/rv` 整体），回填 K missed。
 
 **后续卡（2026-10-05 定，run-card 验收后按顺序写卡派发）**
 - 卡 2 · 跑之前/跑当中（改 `run-card.mjs`）：
