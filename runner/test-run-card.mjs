@@ -559,6 +559,25 @@ No rm, no git push
     assert.ok(fs.existsSync(exitFileQ3), "exit file should exist");
     assert.strictEqual(fs.readFileSync(exitFileQ3, "utf8").trim(), "interrupted");
 
+    // Case Q4 (run-long --resume): a stale exit file from a previous run is removed before the command starts;
+    // the stream is appended, not truncated.
+    {
+      const outQ4 = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-out-q4-"));
+      const exitFileQ4 = path.join(tempLive, "run-case-q4.exit");
+      const streamFileQ4 = path.join(tempLive, "run-case-q4.jsonl");
+      fs.writeFileSync(exitFileQ4, "1\n");
+      fs.writeFileSync(streamFileQ4, "old-line\n");
+      const probe = `process.exit(require("fs").existsSync(${JSON.stringify(exitFileQ4)}) ? 3 : 0)`;
+      const resQ4 = spawnSync(process.execPath, [
+        runLongScript, "--name", "case-q4", "--out", outQ4, "--resume",
+        "--", process.execPath.replaceAll("\\", "/"), "-e", probe
+      ], { env: baseEnv, encoding: "utf8" });
+      assert.strictEqual(resQ4.status, 0, `run-long wrapper should exit 0, got ${resQ4.status}: ${resQ4.stderr}`);
+      assert.strictEqual(fs.readFileSync(exitFileQ4, "utf8").trim(), "0", "stale exit file must be gone while the command runs; new exit must be 0");
+      assert.ok(fs.readFileSync(streamFileQ4, "utf8").includes("old-line"), "--resume must append to the stream, not truncate it");
+      fs.rmSync(outQ4, { recursive: true, force: true });
+    }
+
     const freshOutDirQ4 = path.join(os.tmpdir(), `orch-test-fresh-out-${Date.now()}-q4`);
     const streamFileQ4 = path.join(tempLive, "run-case-q4.jsonl");
     const exitFileQ4 = path.join(tempLive, "run-case-q4.exit");
@@ -887,11 +906,83 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 23) {
-    console.log("23/23 passed");
+  // Case X: card Files may change: `src/`; src/old.txt committed = "a\n", src/big.bin (2 MiB, git-ignored) written but
+  // not committed; round 1 → passed_no_review; append ## Fix 1; --fix 1 appends to src/big.bin → the base dir has no
+  // src/big.bin copy (stat-only), and the diff lists src/big.bin as a changed large/ignored file.
+  {
+    resetRepo();
+    const srcDirX = path.join(tempRepo, "src");
+    fs.mkdirSync(srcDirX, { recursive: true });
+    fs.writeFileSync(path.join(srcDirX, "old.txt"), "a\n", "utf8");
+    fs.writeFileSync(path.join(srcDirX, "big.bin"), "x".repeat(2 * 1024 * 1024), "utf8");
+    fs.writeFileSync(path.join(tempRepo, ".gitignore"), "src/big.bin\n", "utf8");
+    spawnSync("git", ["add", "src/old.txt", ".gitignore"], { cwd: tempRepo, stdio: "ignore" });
+    spawnSync("git", ["commit", "-m", "commit src/old.txt and .gitignore"], { cwd: tempRepo, stdio: "ignore" });
+
+    const cardX = `# test-task — test card
+
+## Goal
+Test fix base with a large git-ignored file.
+
+## Risk
+low
+
+## Files
+may change: \`src/\` / read-only: \`data/\`
+
+## Steps (N = 1)
+1. Step 1.
+
+## Check
+\`node -e "process.exit(0)"\`
+
+## Don't
+Run scripts in the foreground and wait
+Reuse existing functions
+No rm, no git push
+`;
+    fs.writeFileSync(cardPath, cardX, "utf8");
+
+    const envX1 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo new > src/new.txt; echo 'STATUS: done'"
+    };
+    delete envX1.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resX1 = runCard("case-x", { env: envX1 });
+    assert.strictEqual(resX1.status, 0, `Case X1 exit status was ${resX1.status}: ${resX1.stderr}`);
+    const stateX1 = readState("case-x");
+    assert.strictEqual(stateX1.outcome, "passed_no_review");
+
+    fs.appendFileSync(cardPath, "\n## Fix 1\n1. Fix step.\n", "utf8");
+
+    const envX2 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo b > src/old.txt; echo y >> src/big.bin; echo 'STATUS: done'"
+    };
+    delete envX2.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resX2 = runCard("case-x", { args: ["--fix", "1"], env: envX2 });
+    assert.strictEqual(resX2.status, 0, `Case X2 exit status was ${resX2.status}: ${resX2.stderr}`);
+    const stateX2 = readState("case-x");
+    assert.strictEqual(stateX2.outcome, "fix_passed");
+
+    const baseBig = path.join(tempLive, "orch-runner", "case-x.fix1.base", "src/big.bin");
+    assert.strictEqual(fs.existsSync(baseBig), false, "src/big.bin should not be copied into the base dir");
+
+    const diffFile = path.join(tempLive, "orch-runner", "case-x.fix1.diff");
+    assert.ok(fs.existsSync(diffFile), "diff file should exist");
+    const diffText = fs.readFileSync(diffFile, "utf8");
+    assert.ok(diffText.includes("-a") && diffText.includes("+b"), `diff should contain -a and +b, got: ${diffText}`);
+    assert.ok(diffText.includes("# large or ignored file changed (not diffed): src/big.bin"), `diff should list src/big.bin, got: ${diffText}`);
+    passedCount++;
+  }
+
+  if (passedCount === 24) {
+    console.log("24/24 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/23 passed`);
+    console.error(`Only ${passedCount}/24 passed`);
     process.exitCode = 1;
   }
 } finally {

@@ -21,6 +21,9 @@ const normLiveDir = path.resolve(liveDir).replaceAll("\\", "/");
 const stateDir = path.posix.join(liveDir, "orch-runner");
 fs.mkdirSync(stateDir, { recursive: true });
 
+// A may-change file larger than this (or git-ignored) is recorded by size + mtime instead of copied as fix base.
+const MAX_BASE_BYTES = 1024 * 1024;
+
 if (args.commit) runCommit(args, { stateDir });
 
 const isFix = args.fix !== undefined;
@@ -304,14 +307,27 @@ if (isFix) {
     basePathsSet.add(p);
   }
   basePaths = Array.from(basePathsSet).sort();
+  let ignored = new Set();
+  if (isGit) {
+    const igRes = spawnSync("git", ["check-ignore", "--stdin"], { cwd: repoAbs, input: basePaths.join("\n"), encoding: "utf8" });
+    ignored = new Set((igRes.stdout ?? "").split(/\r?\n/).filter(Boolean));
+  }
+  const stats = {};
   for (const p of basePaths) {
     const src = path.resolve(repoAbs, p);
     const dest = path.resolve(baseDir, p);
     if (fs.existsSync(src) && fs.statSync(src).isFile()) {
+      const st = fs.statSync(src);
+      if (ignored.has(p) || st.size > MAX_BASE_BYTES) {
+        stats[p] = { size: st.size, mtimeMs: st.mtimeMs };
+        continue;
+      }
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.copyFileSync(src, dest);
     }
   }
+  state.fixBaseStats = stats;
+  save(state);
 } else {
   state = {
     name,
@@ -538,7 +554,9 @@ if (isFix) {
   }
   const diffPaths = Array.from(diffPathsSet).sort();
   const diffPieces = [];
+  const statKeys = new Set(Object.keys(state.fixBaseStats || {}));
   for (const p of diffPaths) {
+    if (statKeys.has(p)) continue;
     const baseCopy = path.resolve(baseDir, p).replaceAll("\\", "/");
     const repoFile = path.resolve(repoAbs, p).replaceAll("\\", "/");
     const baseExists = fs.existsSync(baseCopy) && fs.statSync(baseCopy).isFile();
@@ -552,6 +570,18 @@ if (isFix) {
     });
     if (dRes.stdout) {
       diffPieces.push(dRes.stdout);
+    }
+  }
+  for (const p of Object.keys(state.fixBaseStats || {}).sort()) {
+    const rec = state.fixBaseStats[p];
+    const repoFile = path.resolve(repoAbs, p);
+    const exists = fs.existsSync(repoFile) && fs.statSync(repoFile).isFile();
+    const nowSize = exists ? fs.statSync(repoFile).size : null;
+    const nowMtime = exists ? fs.statSync(repoFile).mtimeMs : null;
+    if (!exists || nowSize !== rec.size || nowMtime !== rec.mtimeMs) {
+      const before = rec.size ?? "-";
+      const after = exists ? nowSize : "-";
+      diffPieces.push(`# large or ignored file changed (not diffed): ${p} (size ${before} → ${after} bytes)\n`);
     }
   }
   fixDiffContent = diffPieces.join("");
