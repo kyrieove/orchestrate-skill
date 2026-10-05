@@ -69,12 +69,18 @@ export async function runReview(ctx) {
     if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
       reviewCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} ${redir} ${q(reviewStream)} 2>&1`;
     } else if (wb) {
-      reviewCmd = `{ echo '{"model":"${reviewer}"}'; ${wbCmd(reviewPrompt, " --disallowedTools Write,Edit,NotebookEdit --output-format text")} < /dev/null > ${q(reviewMdAbs)}; } ${redir} ${q(reviewStream)} 2>&1`;
+      reviewCmd = `{ echo '{"model":"${reviewer}"}'; ${wbCmd(reviewPrompt, " --disallowedTools Write,Edit,NotebookEdit --output-format stream-json")} < /dev/null; } ${redir} ${q(reviewStream)} 2>&1`;
     } else {
       reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } ${redir} ${q(reviewStream)} 2>&1`;
     }
 
     const reviewRes = await runBash(reviewCmd, { cwd: repoAbs, timeoutMin: remainingMin(), exitPath: reviewExit });
+    // wb streams JSON (so its lane shows progress); review.md gets the text of the newest result line.
+    if (wb && fs.existsSync(reviewStream)) {
+      const result = fs.readFileSync(reviewStream, "utf8").split("\n").reverse()
+        .map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((o) => o?.type === "result");
+      if (result) fs.writeFileSync(reviewMdAbs, result.result ?? "", "utf8");
+    }
 
     if (reviewRes.timedOut) {
       state.outcome = "interrupted";
