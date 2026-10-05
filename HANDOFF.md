@@ -28,14 +28,17 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
 run-card.mjs 仍有 677 行（目标 600），剩下是参数/状态初始化和摘要打印。新增 `--reviewer luna|sol`（54504dc）。
 
 **下一步（新会话）**
-1. ✅ 已修（2026-10-05）：钩子里 git 设的 `GIT_DIR`/`GIT_INDEX_FILE` 漏进测试子进程，临时仓库的 git 操作到外层仓库；`test-run-card.mjs` 开头删掉所有 `GIT_*`。
-   还没用真卡跑一次 `run-card.mjs --commit` 端到端确认。
-2. token 实测：卡 6 的 Fix 1 续 agy 会话，fresh 799k，比第 1 轮整卡（fresh 335k）还多，只是删 ~40 行。下一个修复轮用 `--fresh` 跑，对比后决定 SKILL.md 默认续会话还是新会话。
+1. ✅ `--commit` 钩子失败已修（fe2048f，测试开头删掉继承的 `GIT_*`），卡 7 用 `--commit` 端到端提交成功（9b48db3）。
+2. ✅ 修复轮默认 `--fresh`（SKILL.md）：卡 7 Fix 1 新会话 fresh 103k，卡 6 续会话 799k。再攒两三轮确认。
 3. 若要继续缩：把参数校验 + 状态初始化挪到 `runner/setup.mjs`、摘要打印挪到 `runner/summary.mjs`。
-4. 卡 6 算 runner 模块第 6 张卡：按 retro 规则该跑一次 sol 整仓 audit（`/rv` 整体），回填 K missed。
+4. ✅ 第二次 sol 整仓 audit（2026-10-05）：7 个 bug 全属实，已回填卡 1–4 的 K missed（bf55594）；卡 7 修了其中 3 个 + 6 处精简。
+   没修（少见）：`git mv` 重命名丢源路径（snapshot.mjs:51）、不存在的只读路径不守卫（run-card.mjs:234）、非 git 快照跳过链接（snapshot.mjs:19）；
+   不修（设计取舍）：已 dirty 文件的审查 diff 混入旧改动（review.mjs）。审查顺带报的老问题：执行者回复缺 STATUS 行被当成功（executor.mjs）。
+   下次 audit：runner 再累积 4–5 张卡后。
 5. 精简（2026-10-05）：执行者提示词加了 lean 一句（复用 > stdlib，不加抽象，回复只给 STATUS + 文件）；审查提示词加列臃肿项（不单独判 FAIL）。
    agy 全局规则去重：同一份 13KB 规则原有 5 份、加载 3 次，现只留 `~/.gemini/config/rules/GEMINI.md`（其余在 `~/.claude/_archive/2026-10-05/gemini-rules-dedup`；
-   `codex-productivity-tools` 插件更新可能放回它那份）。下一张卡对比 agy token 和 diff 行数看效果。不做：MCP 包装 runner（不省 token）、agy 自审轮（贵且同模型看不出）。
+   `codex-productivity-tools` 插件更新可能放回它那份）。不做：MCP 包装 runner（不省 token）、agy 自审轮（贵且同模型看不出）。
+   效果还看不出：卡 7 是改动后第一张卡，第 1 轮 fresh 696k（卡 6 335k），但卡 7 步骤多一倍；sol 报 bloat: none。
 
 **后续卡（2026-10-05 定，run-card 验收后按顺序写卡派发）**
 - 卡 2 · 跑之前/跑当中（改 `run-card.mjs`）：

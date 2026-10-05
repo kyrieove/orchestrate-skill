@@ -118,8 +118,8 @@ conformance review catches a wrong number; only an independent recompute does.
    declaration): Claude fixes it directly — except in fixed modes or when the user asked Claude not to implement
    (same rule as **Who writes**) — re-runs the Check, and says so in Acceptance — an executor fix round costs
    ~0.3 M fresh + 3 M cached tokens (2026-10-05). Anything larger: append `## Fix N` to the card (exact steps), then
-   `node ~/.claude/skills/orchestrate/runner/run-card.mjs --fix N --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
-   It runs the executor (agy continues its conversation; `--fresh` starts a new one — compare the ledger rows),
+   `node ~/.claude/skills/orchestrate/runner/run-card.mjs --fix N --fresh --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
+   It runs the executor (`--fresh`: a new agy session — 2026-10-05 a fresh Fix 1 cost 103k fresh tokens, a continued one 799k; drop it to continue),
    read-only guard, files check and Check, no second conformance review; the summary carries the fix diff, which is
    all Claude reads. High risk: recompute the key number again. Max 2 fixes, then a new card in `<task>-v2/`.
 6. **Accept.** Turn `## Acceptance (draft)` into `## Acceptance`: replace the `TODO`s (verdict: accepted / review
