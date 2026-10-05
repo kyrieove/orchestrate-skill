@@ -28,8 +28,8 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
 run-card.mjs 仍有 677 行（目标 600），剩下是参数/状态初始化和摘要打印。新增 `--reviewer luna|sol`（54504dc）。
 
 **下一步（新会话）**
-1. 🐞 `run-card.mjs --commit` 提交时 pre-commit 钩子里的 `node runner/test-run-card.mjs` 失败，同样的暂存内容直接 `git commit` 就通过
-   （卡 6 只好手动提交，state 里没记 commit）。先查：runner 起 git 时传下去的环境变量（GIT_* / ORCH_RUNNER_*）是否漏进测试的子进程。
+1. ✅ 已修（2026-10-05）：钩子里 git 设的 `GIT_DIR`/`GIT_INDEX_FILE` 漏进测试子进程，临时仓库的 git 操作到外层仓库；`test-run-card.mjs` 开头删掉所有 `GIT_*`。
+   还没用真卡跑一次 `run-card.mjs --commit` 端到端确认。
 2. token 实测：卡 6 的 Fix 1 续 agy 会话，fresh 799k，比第 1 轮整卡（fresh 335k）还多，只是删 ~40 行。下一个修复轮用 `--fresh` 跑，对比后决定 SKILL.md 默认续会话还是新会话。
 3. 若要继续缩：把参数校验 + 状态初始化挪到 `runner/setup.mjs`、摘要打印挪到 `runner/summary.mjs`。
 4. 卡 6 算 runner 模块第 6 张卡：按 retro 规则该跑一次 sol 整仓 audit（`/rv` 整体），回填 K missed。

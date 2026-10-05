@@ -11,6 +11,9 @@ const runCardScript = path.resolve(__dirname, "run-card.mjs").replaceAll("\\", "
 const runLongScript = path.resolve(__dirname, "run-long.mjs").replaceAll("\\", "/");
 const statsScript = path.resolve(__dirname, "stats.mjs").replaceAll("\\", "/");
 
+// Run inside a git hook, GIT_DIR/GIT_INDEX_FILE etc. are inherited and would point the temp-repo git calls at the outer repo.
+for (const k of Object.keys(process.env)) if (k.startsWith("GIT_")) delete process.env[k];
+
 const tempRepo = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-repo-")).replaceAll("\\", "/");
 const tempLive = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-live-")).replaceAll("\\", "/");
 
