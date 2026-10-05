@@ -20,18 +20,15 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 
 | Command | Executor | Use for |
 |---|---|---|
-| `/orch` (default) | Claude picks: all code, including new algorithms and ports → the code worker (agy or wb, see below); lookups, citation checks, bulk fact extraction → luna; sol executes only when the code worker failed the same card after 2 fixes (ask the user first, naming the job) | user didn't choose |
-
-**Code worker** (user, 2026-10-05): at the start of every `/orch` task, before the first code card, ask in one line
-"写代码交给 agy 还是 wb？" and use the answer for that task's code cards. The user rated wb (DeepSeek v4.1 flash) above
-agy after 4 cards on 2026-10-05. Reviews stay on codex (or wb while the Codex → wb switch is on).
-
-Heavy work goes to agy because review layers 2 and 3 catch its misses: on 2026-10-04 sol spent 4.5 M tokens
-executing the Cartool port, against 0.2–0.3 M for a typical agy card.
+| `/orch` (default) | all code, including new algorithms and ports → the code worker (asked, see below); Claude picks the rest: lookups, citation checks, bulk fact extraction → luna; sol executes only when the code worker failed the same card after 2 fixes (ask the user first, naming the job) | user didn't choose |
 | `/agy` | agy | fixed |
 | `/luna` | codex `gpt-6-luna` | fixed |
 | `/sol` | codex `gpt-6.1-sol` | fixed |
 | `/wb` | CodeBuddy CLI (WorkBuddy account) `deepseek-v4.1-flash` high | fixed |
+
+**Code worker** (user, 2026-10-05): before the first code card of every `/orch` task ask "写代码交给 agy 还是 wb？";
+the user rated wb above agy after 4 cards. Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its
+misses (2026-10-04: sol spent 4.5 M tokens executing the Cartool port, against 0.2–0.3 M for a typical agy card).
 
 **Codex → wb switch** (manual, user 2026-10-05): while `~/.claude/skills/orchestrate/codex-fallback` reads `on`,
 the runner sends every codex place — luna, sol and every review — to wb on `deepseek-v4.1-flash`; agy is
@@ -49,7 +46,9 @@ other codex model → ask, stating the concrete job. agy's model is fixed.
 - fixed modes (`/agy`, `/luna`, `/sol`, `/wb`) → stop and tell the user; never switch executor on your own.
 - `/orch` → ask the user which other executor to use, naming the job. Claude still doesn't implement.
 
-**Reviewer out of quota** → do not replace the conformance review with a Claude line-by-line read. Accept
+**Reviewer out of quota.** Known before the start (the runner's quota precheck exits 2 with `codex quota used up`)
+→ ask the user about the Codex → wb switch; no provisional acceptance. Only when codex runs out during the review
+(`review_error` with quota text): do not replace the conformance review with a Claude line-by-line read. Accept
 provisionally as `review pending` (in `## Acceptance` and the project log), and run the codex review when
 quota returns. High risk: may be committed but marked `unreviewed`; its numbers don't go into the paper
 until the review passes. (2026-10-01: Claude's line-by-line review passed a card; the later sol review found 2 real
@@ -259,6 +258,12 @@ whole file. If the last line is not a result (crash, killed), read the last few 
 ```bash
 { echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: <paths from the before snapshot>. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each with file:line, the problem and the fix — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
 ```
+
+**wb executes / reviews** (`/wb`, or any codex place while the Codex → wb switch is on): the same two commands with
+`codebuddy` in place of `codex exec` — exec: `{ echo '{"model":"deepseek-v4.1-flash"}'; codebuddy -p "<same prompt>" --model deepseek-v4.1-flash --effort high -y --output-format stream-json < /dev/null; } > ~/.claude/agent-live/codex-<name>.jsonl 2>&1`;
+review: add `--disallowedTools Write,Edit,NotebookEdit` and write to `codex-review-<name>.jsonl`. The reply is the `result` field of
+the last `{"type":"result"}` line; for a review, save it as `<task dir>/review.md`. wb has no read-only sandbox: run
+`git status --short` before and after the review and treat any difference as a failed review.
 
 Fill `<paths from the before snapshot>` from step 3 (2026-10-04: without it sol failed a card for the user's own earlier edits). Run the review in the background too.
 

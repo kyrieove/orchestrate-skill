@@ -7,7 +7,7 @@ export const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
 export const WB_MODEL = "deepseek-v4.1-flash";
 export const wbCmd = (prompt, extra = "") => `codebuddy -p ${q(prompt)} --model ${WB_MODEL} --effort high -y${extra}`;
 
-// Token Weather's WB button writes "on" here; while on, codex's places (luna, sol, review) go to wb.
+// Claude writes "on" here on the user's word; while on, codex's places (luna, sol, review) go to wb.
 export const CODEX_FALLBACK_FILE = process.env.ORCH_CODEX_FALLBACK_FILE || "C:/Users/ASUS/.claude/skills/orchestrate/codex-fallback";
 export function codexFallback() {
   try { return fs.readFileSync(CODEX_FALLBACK_FILE, "utf8").trim() === "on"; } catch { return false; }
