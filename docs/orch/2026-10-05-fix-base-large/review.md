@@ -11,4 +11,3 @@ Bloat:
 - run-card.mjs:582 — `rec.size ?? "-"` is dead: a fixBaseStats key is only ever written with a numeric size, so the `-` before-branch is unreachable.
 
 Pre-existing (outside this card, not introduced here): the run-long.mjs stale-exit-file change and the Case Q4 test additions were already uncommitted before this task; no problems with them.
- task; no problems with them.
