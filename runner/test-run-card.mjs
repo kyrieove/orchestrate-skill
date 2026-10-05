@@ -16,6 +16,7 @@ for (const k of Object.keys(process.env)) if (k.startsWith("GIT_")) delete proce
 
 const tempRepo = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-repo-")).replaceAll("\\", "/");
 const tempLive = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-live-")).replaceAll("\\", "/");
+let fakeBin = null;
 
 let passedCount = 0;
 
@@ -77,8 +78,22 @@ No rm, no git push
 
   const baseEnv = {
     ...process.env,
-    ORCH_RUNNER_LIVE_DIR: tempLive
+    ORCH_RUNNER_LIVE_DIR: tempLive,
+    ORCH_CODEX_FALLBACK_FILE: `${tempLive}/codex-fallback`
   };
+
+  fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-bin-")).replaceAll("\\", "/");
+  const stream = (reply) => [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "x" }] } }),
+    JSON.stringify({ type: "result", subtype: "success", is_error: false, result: reply }),
+  ].join("\n");
+  fs.writeFileSync(path.join(fakeBin, "codebuddy"),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >> "${fakeBin}/argv"\ncase "$*" in\n  *disallowedTools*) cat <<'EOF'\n${stream("VERDICT: PASS")}\nEOF\n  ;;\n  *) cat <<'EOF'\n${stream("STATUS: done")}\nEOF\n  ;;\nesac\n`,
+    { mode: 0o755 });
+  const wbEnv = { ...baseEnv, PATH: `${fakeBin}${path.delimiter}${process.env.PATH}` };
+  delete wbEnv.ORCH_RUNNER_FAKE_EXEC;
+  delete wbEnv.ORCH_RUNNER_FAKE_REVIEW;
 
   function runCard(name, { risk, env = baseEnv, args = [], card } = {}) {
     const isCommit = args.includes("--commit");
@@ -978,14 +993,52 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 24) {
-    console.log("24/24 passed");
+  // Case Y (switch on): codex-fallback "on" + --executor luna → the codex places go to wb; risk medium → the fake
+  // codebuddy exec replies STATUS: done and its review replies VERDICT: PASS → review_pass on wb's model.
+  {
+    resetRepo();
+    fs.writeFileSync(`${tempLive}/codex-fallback`, "on\n");
+    writeCard(undefined, "medium");
+    const resY = runCard("case-y", { risk: "medium", env: wbEnv, args: ["--executor", "luna"] });
+
+    assert.strictEqual(resY.status, 0, `Case Y exit status was ${resY.status}: ${resY.stderr}`);
+    const stateY = readState("case-y");
+    assert.strictEqual(stateY.outcome, "review_pass");
+    assert.strictEqual(stateY.exec.status, "done");
+    assert.strictEqual(stateY.review.model, "deepseek-v4.1-flash");
+    const reviewY = fs.readFileSync(path.join(tempRepo, "docs/orch/t/review.md"), "utf8").split(/\r?\n/)[0].trim();
+    assert.strictEqual(reviewY, "VERDICT: PASS");
+    // Both wb calls (exec and review) passed the model to codebuddy itself, not only in the echoed first line.
+    const argvY = fs.readFileSync(`${fakeBin}/argv`, "utf8").trim().split("\n");
+    assert.strictEqual(argvY.length, 2, `expected 2 codebuddy calls, got: ${argvY.join(" | ")}`);
+    assert.ok(argvY.every((a) => a.includes("--model deepseek-v4.1-flash")), `codebuddy argv lacks the model: ${argvY.join(" | ")}`);
+    fs.rmSync(`${fakeBin}/argv`, { force: true });
+    fs.rmSync(`${tempLive}/codex-fallback`, { force: true });
+    passedCount++;
+  }
+
+  // Case Z (--executor wb, switch off): risk low → the fake codebuddy exec replies STATUS: done → passed_no_review.
+  {
+    resetRepo();
+    writeCard();
+    const resZ = runCard("case-z", { env: wbEnv, args: ["--executor", "wb"] });
+
+    assert.strictEqual(resZ.status, 0, `Case Z exit status was ${resZ.status}: ${resZ.stderr}`);
+    const stateZ = readState("case-z");
+    assert.strictEqual(stateZ.outcome, "passed_no_review");
+    assert.strictEqual(stateZ.exec.status, "done");
+    passedCount++;
+  }
+
+  if (passedCount === 26) {
+    console.log("26/26 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/24 passed`);
+    console.error(`Only ${passedCount}/26 passed`);
     process.exitCode = 1;
   }
 } finally {
   fs.rmSync(tempRepo, { recursive: true, force: true });
   fs.rmSync(tempLive, { recursive: true, force: true });
+  if (fakeBin) fs.rmSync(fakeBin, { recursive: true, force: true });
 }
