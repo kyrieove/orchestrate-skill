@@ -20,7 +20,11 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 
 | Command | Executor | Use for |
 |---|---|---|
-| `/orch` (default) | Claude picks: all code, including new algorithms and ports → agy; lookups, citation checks, bulk fact extraction → luna; sol executes only when agy failed the same card after 2 fixes (ask the user first, naming the job) | user didn't choose |
+| `/orch` (default) | Claude picks: all code, including new algorithms and ports → the code worker (agy or wb, see below); lookups, citation checks, bulk fact extraction → luna; sol executes only when the code worker failed the same card after 2 fixes (ask the user first, naming the job) | user didn't choose |
+
+**Code worker** (user, 2026-10-05): at the start of every `/orch` task, before the first code card, ask in one line
+"写代码交给 agy 还是 wb？" and use the answer for that task's code cards. The user rated wb (DeepSeek v4.1 flash) above
+agy after 4 cards on 2026-10-05. Reviews stay on codex (or wb while the Codex → wb switch is on).
 
 Heavy work goes to agy because review layers 2 and 3 catch its misses: on 2026-10-04 sol spent 4.5 M tokens
 executing the Cartool port, against 0.2–0.3 M for a typical agy card.
@@ -100,7 +104,7 @@ conformance review catches a wrong number; only an independent recompute does.
    node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl
    ```
    Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
-   command. The runner lints the card (exit 2 lists every problem; nothing has started), snapshots git status + content
+   command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` → ask the user about the Codex → wb switch), snapshots git status + content
    hashes, runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
    prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
