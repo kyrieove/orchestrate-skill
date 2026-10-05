@@ -86,3 +86,4 @@ Don't install packages. Don't run real agy/codex executors from the test.
 - tokens: exec gemini-3.8-flash-high: fresh 667k, cached 6509k, out 71k · review gpt-6-luna: fresh 37k, cached 102k, out 2k
 - review findings: 1 real / 0 false positive / 1 missed (stats averaging, found by Claude on real data) (medium, gpt-6-luna)
 - K missed backfill (retro 2026-10-05): 2 (found after acceptance): codex executor lacked --skip-git-repo-check outside git; run-long read the whole log for its tail — /rv sol, fixed 834eeee
+- K missed backfill (audit sol 2026-10-05 #2): 3 — non-git snapshot skips symlinks/junctions (snapshot.mjs); run-long joins argv without quoting, paths with spaces break (run-long.mjs); stats counts only the last round's tokens/time (stats.mjs)

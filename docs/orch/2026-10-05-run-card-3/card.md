@@ -114,3 +114,4 @@ Don't install packages. Don't run real agy/codex executors from the test.
 - review findings: 1 real / 0 false positive / 0 missed (medium, gpt-6-luna); plus 2 bugs caught by the runner's Check before review
 - lesson: with the Check owned by the runner, the executor ships unverified code; card 4 adds a cheap syntax self-check (`node --check`) to the executor prompt
 - K missed backfill (retro 2026-10-05): 4 (found after acceptance): --commit failed on a never-tracked file removed by a fix; fix-round ledger charged the old review; --fix accepted a different card/repo — /rv sol, fixed 834eeee; fix base copies skipped files under allowed directories — audit sol, fixed 2177aee
+- K missed backfill (audit sol 2026-10-05 #2): 1 — --fix re-parses ## Files for the scope check but state.mayChange stays old, so --commit leaves out files added for the fix (run-card.mjs)

@@ -91,3 +91,4 @@ Don't install packages. Don't run real agy/codex executors from the test.
 - tokens: exec gemini-3.8-flash-high: fresh 815k, cached 7099k, out 78k · review gpt-6-luna: fresh 31k, cached 64k, out 1k
 - review findings: 1 real / 0 false positive / 0 missed (medium, gpt-6-luna)
 - K missed backfill (retro 2026-10-05): 2 (found after acceptance): read-only walk of an ancestor included the live dir / task dir — /rv sol, fixed 834eeee; read-only walk skipped symlinks/junctions — audit sol, fixed 2177aee
+- K missed backfill (audit sol 2026-10-05 #2): 1 — read-only paths that don't exist yet are dropped, so files created there go unguarded (run-card.mjs)
