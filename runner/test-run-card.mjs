@@ -422,11 +422,12 @@ No rm, no git push
     const cardM1 = fs.readFileSync(cardPath, "utf8");
     assert.ok(cardM1.includes("## Acceptance (draft)"), "Card should get ## Acceptance (draft)");
 
+    fs.writeFileSync(cardPath, cardM1.replace("`b.txt` /", "`b.txt`, `c.txt` /"), "utf8");
     fs.appendFileSync(cardPath, "\n## Fix 1\n1. Fix step.\n", "utf8");
 
     const envM2 = {
       ...baseEnv,
-      ORCH_RUNNER_FAKE_EXEC: "echo y > b.txt; echo 'STATUS: done'"
+      ORCH_RUNNER_FAKE_EXEC: "echo y > b.txt; echo z > c.txt; echo 'STATUS: done'"
     };
     delete envM2.ORCH_RUNNER_FAKE_REVIEW;
 
@@ -435,6 +436,7 @@ No rm, no git push
     assert.strictEqual(resM2.status, 0, `Case M (fix 1) exit status was ${resM2.status}: ${resM2.stderr}`);
     const stateM2 = readState("case-m");
     assert.strictEqual(stateM2.outcome, "fix_passed");
+    assert.ok(stateM2.mayChange.includes("c.txt"), "mayChange should include c.txt");
     assert.ok(stateM2.fixes && stateM2.fixes.length === 1, "state.fixes.length should be 1");
 
     const diffFile = path.join(tempLive, "orch-runner", "case-m.fix1.diff");
@@ -461,7 +463,7 @@ No rm, no git push
 
   // Case O (commit): after M, --commit refuses (exit 2) while the draft heading is there; then replace the draft section
   // by ## Acceptance + - verdict: accepted, create an unrelated untracked z.txt, run --commit --message t
-  // → exit 0 and git show --name-only --format= HEAD lists exactly a.txt, b.txt, docs/orch/t/card.md.
+  // → exit 0 and git show --name-only --format= HEAD lists exactly a.txt, b.txt, c.txt, docs/orch/t/card.md.
   {
     const resO1 = runCard("case-m", { args: ["--commit", "--message", "t"] });
     assert.strictEqual(resO1.status, 2, `Expected exit 2 while draft heading is present, got ${resO1.status}`);
@@ -478,7 +480,7 @@ No rm, no git push
     const showRes = spawnSync("git", ["-C", tempRepo, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
     assert.strictEqual(showRes.status, 0);
     const committedFiles = showRes.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
-    assert.deepStrictEqual(committedFiles, ["a.txt", "b.txt", "docs/orch/t/card.md"]);
+    assert.deepStrictEqual(committedFiles, ["a.txt", "b.txt", "c.txt", "docs/orch/t/card.md"]);
     passedCount++;
   }
 
@@ -556,6 +558,21 @@ No rm, no git push
     assert.ok(elapsedQ3 < 6.0, `Expected timeout within 6s, took ${elapsedQ3}s`);
     assert.ok(fs.existsSync(exitFileQ3), "exit file should exist");
     assert.strictEqual(fs.readFileSync(exitFileQ3, "utf8").trim(), "interrupted");
+
+    const freshOutDirQ4 = path.join(os.tmpdir(), `orch-test-fresh-out-${Date.now()}-q4`);
+    const streamFileQ4 = path.join(tempLive, "run-case-q4.jsonl");
+    const exitFileQ4 = path.join(tempLive, "run-case-q4.exit");
+    const resQ4 = spawnSync(process.execPath, [
+      runLongScript,
+      "--name", "case-q4",
+      "--out", freshOutDirQ4,
+      "--", "printf", "%s\n", "a b"
+    ], { env: baseEnv, encoding: "utf8" });
+    assert.strictEqual(resQ4.status, 0, `Expected exit 0 for run-long printf, got ${resQ4.status}: ${resQ4.stderr}`);
+    assert.ok(fs.existsSync(exitFileQ4), "exit file should exist");
+    assert.strictEqual(fs.readFileSync(exitFileQ4, "utf8").trim(), "0");
+    assert.ok(fs.existsSync(streamFileQ4), "stream file should exist");
+    assert.ok(fs.readFileSync(streamFileQ4, "utf8").split(/\r?\n/).includes("a b"), "stream should contain the line 'a b'");
     passedCount++;
   }
 
@@ -632,9 +649,11 @@ No rm, no git push
     }
   }
 
-  // Case S (stats): write three state JSONs into a temp live dir's orch-runner/ (two agy/medium, one sol/high,
-  // with exec.seconds, outcome, ledger exec rows and one with fixes: [{n:1}]) → output has a line starting
-  // agy/medium containing cards 2 and fixes 1, a line starting sol/high containing cards 1, and total cards 3.
+  // Case S (stats): write five state JSONs into a temp live dir's orch-runner/ (two agy/medium, one sol/high,
+  // one agy/low with rounds, one luna/low with rounds but no round seconds, with exec.seconds, outcome,
+  // ledger exec rows and fixes) → output has a line starting agy/medium containing cards 2 and fixes 1,
+  // a line starting sol/high containing cards 1, a line starting agy/low containing fresh 120k and exec 1.5m,
+  // a line starting luna/low containing exec 2.0m, and total cards 5.
   {
     const statsLive = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-stats-live-")).replaceAll("\\", "/");
     const statsStateDir = path.join(statsLive, "orch-runner");
@@ -667,10 +686,37 @@ No rm, no git push
       ledger: [{ role: "exec", fresh: 300000, cached: 800000, out: 30000 }],
       fixes: []
     };
+    const state4 = {
+      name: "stats-4",
+      executor: "agy",
+      risk: "low",
+      outcome: "fix_passed",
+      exec: { seconds: 30 },
+      ledger: [{ role: "exec", fresh: 20000, cached: 0, out: 0 }],
+      fixes: [{ n: 1 }],
+      rounds: [
+        { round: "1", ledger: [{ role: "exec", fresh: 100000, cached: 0, out: 0 }], seconds: 60 },
+        { round: "Fix 1", ledger: [{ role: "exec", fresh: 20000, cached: 0, out: 0 }], seconds: 30 }
+      ]
+    };
+    const state5 = {
+      name: "stats-5",
+      executor: "luna",
+      risk: "low",
+      outcome: "fix_passed",
+      exec: { seconds: 120 },
+      fixes: [{ n: 1 }],
+      rounds: [
+        { round: "1", ledger: [] },
+        { round: "Fix 1", ledger: [] }
+      ]
+    };
 
     fs.writeFileSync(path.join(statsStateDir, "stats-1.json"), JSON.stringify(state1), "utf8");
     fs.writeFileSync(path.join(statsStateDir, "stats-2.json"), JSON.stringify(state2), "utf8");
     fs.writeFileSync(path.join(statsStateDir, "stats-3.json"), JSON.stringify(state3), "utf8");
+    fs.writeFileSync(path.join(statsStateDir, "stats-4.json"), JSON.stringify(state4), "utf8");
+    fs.writeFileSync(path.join(statsStateDir, "stats-5.json"), JSON.stringify(state5), "utf8");
 
     const statsRes = spawnSync(process.execPath, [statsScript], {
       env: { ...process.env, ORCH_RUNNER_LIVE_DIR: statsLive },
@@ -685,11 +731,20 @@ No rm, no git push
     assert.ok(agyMediumLine.includes("cards 2"), "agy/medium line should contain 'cards 2'");
     assert.ok(agyMediumLine.includes("fixes 1"), "agy/medium line should contain 'fixes 1'");
 
+    const agyLowLine = lines.find((l) => l.startsWith("agy/low"));
+    assert.ok(agyLowLine, "Expected a line starting with agy/low");
+    assert.ok(agyLowLine.includes("fresh 120k"), "agy/low line should contain 'fresh 120k'");
+    assert.ok(agyLowLine.includes("exec 1.5m"), "agy/low line should contain 'exec 1.5m'");
+
+    const lunaLowLine = lines.find((l) => l.startsWith("luna/low"));
+    assert.ok(lunaLowLine, "Expected a line starting with luna/low");
+    assert.ok(lunaLowLine.includes("exec 2.0m"), "luna/low line should contain 'exec 2.0m'");
+
     const solHighLine = lines.find((l) => l.startsWith("sol/high"));
     assert.ok(solHighLine, "Expected a line starting with sol/high");
     assert.ok(solHighLine.includes("cards 1"), "sol/high line should contain 'cards 1'");
 
-    assert.ok(lines.some((l) => l === "total cards 3"), "Output should contain 'total cards 3'");
+    assert.ok(lines.some((l) => l === "total cards 5"), "Output should contain 'total cards 5'");
 
     fs.rmSync(statsLive, { recursive: true, force: true });
     passedCount++;

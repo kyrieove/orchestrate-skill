@@ -35,12 +35,7 @@ export async function runExecutor(ctx) {
     execPrompt = `Read ${cardAbs} and carry out every step exactly; run only the commands the Steps name; do NOT run the Check — the runner runs it after you exit; do not commit. Reply: first line exactly STATUS: done, STATUS: blocked or STATUS: failed; then files changed and anything you could not do. Before replying, run a syntax-only check on every file you changed (e.g. node --check <file>, python -m py_compile <file>); this is not the Check. ${lean} ${progressLine}`;
   }
 
-  let S;
-  if (process.env.ORCH_RUNNER_FAKE_EXEC || executor === "agy") {
-    S = path.posix.join(liveDir, `agy-${name}.jsonl`);
-  } else {
-    S = path.posix.join(liveDir, `codex-${name}.jsonl`);
-  }
+  const S = path.posix.join(liveDir, `${progressPrefix}-${name}.jsonl`);
   const E = S.replace(/\.jsonl$/, ".exit");
 
   let execCmd;
@@ -104,11 +99,9 @@ export async function runExecutor(ctx) {
       };
       save(state);
 
-      if (execResult.exit !== 0 || status === "failed") {
-        state.outcome = "failed";
-        save(state);
-      } else if (status === "blocked") {
-        state.outcome = "blocked";
+      const failOutcome = execResult.exit !== 0 || status === "failed" ? "failed" : status === "blocked" ? "blocked" : null;
+      if (failOutcome) {
+        state.outcome = failOutcome;
         save(state);
       }
     }
@@ -123,5 +116,4 @@ export async function runExecutor(ctx) {
     }
   }
 
-  return { S, E, progressPrefix };
 }

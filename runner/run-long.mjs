@@ -16,7 +16,7 @@ if (cmdParts.length === 0) {
   console.error("No command specified after '--'");
   process.exit(2);
 }
-const command = cmdParts.join(" ");
+const command = cmdParts.length === 1 ? cmdParts[0] : cmdParts.map(q).join(" ");
 
 let name = null;
 let outDir = null;
@@ -25,25 +25,17 @@ let timeoutMin = 110;
 
 for (let i = 0; i < optArgs.length; i++) {
   const arg = optArgs[i];
+  if (["--name", "--out", "--timeout-min"].includes(arg) && (i + 1 >= optArgs.length || optArgs[i + 1].startsWith("--"))) {
+    console.error(`Missing value for ${arg}`);
+    process.exit(2);
+  }
   if (arg === "--resume") {
     resume = true;
   } else if (arg === "--name") {
-    if (i + 1 >= optArgs.length || optArgs[i + 1].startsWith("--")) {
-      console.error("Missing value for --name");
-      process.exit(2);
-    }
     name = optArgs[++i];
   } else if (arg === "--out") {
-    if (i + 1 >= optArgs.length || optArgs[i + 1].startsWith("--")) {
-      console.error("Missing value for --out");
-      process.exit(2);
-    }
     outDir = optArgs[++i];
   } else if (arg === "--timeout-min") {
-    if (i + 1 >= optArgs.length || optArgs[i + 1].startsWith("--")) {
-      console.error("Missing value for --timeout-min");
-      process.exit(2);
-    }
     const val = optArgs[++i];
     timeoutMin = parseFloat(val);
     if (isNaN(timeoutMin) || timeoutMin <= 0) {

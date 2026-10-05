@@ -71,23 +71,14 @@ if (isFix) {
     process.exit(2);
   }
 
-  if (executor !== undefined) {
-    if (executor !== existingState.executor) {
-      console.error(`--executor '${executor}' does not match state '${existingState.executor}'`);
+  for (const [key, val] of [["executor", executor], ["risk", risk]]) {
+    if (val !== undefined && val !== existingState[key]) {
+      console.error(`--${key} '${val}' does not match state '${existingState[key]}'`);
       process.exit(2);
     }
-  } else {
-    executor = existingState.executor;
   }
-
-  if (risk !== undefined) {
-    if (risk !== existingState.risk) {
-      console.error(`--risk '${risk}' does not match state '${existingState.risk}'`);
-      process.exit(2);
-    }
-  } else {
-    risk = existingState.risk;
-  }
+  executor = existingState.executor;
+  risk = existingState.risk;
 
   // --commit later uses the saved card and repo, so a fix must run on the same ones.
   for (const [arg, saved] of [["card", existingState.card], ["repo", existingState.repo]]) {
@@ -258,9 +249,11 @@ if (isFix) {
   state.git = existingState.git !== undefined ? existingState.git : isGit;
   if (!state.rounds) state.rounds = [];
   if (state.rounds.length === 0) {
-    state.rounds.push({ round: "1", ledger: state.ledger, touched: state.touched });
+    state.rounds.push({ round: "1", ledger: state.ledger, touched: state.touched, seconds: state.exec?.seconds ?? null });
   }
   if (!state.fixes) state.fixes = [];
+  state.mayChange = mayChange;
+  state.check = check;
   state.stage = "executing";
   state.outcome = null;
   state.readOnlyChanged = null;
@@ -372,7 +365,7 @@ if (isFix) {
 }
 
 // 4. Executor
-const { S, E, progressPrefix } = await runExecutor({
+await runExecutor({
   executor,
   liveDir,
   name,
@@ -415,11 +408,9 @@ function scopeCheck() {
       outOfScope.push(p);
     }
   }
-  outOfScope.sort();
   state.outOfScope = outOfScope;
 
   const junk = outOfScope.filter(isJunkPath);
-  junk.sort();
   state.junk = junk;
 
   return outOfScope;
@@ -572,7 +563,8 @@ if (isFix) {
     ledger: state.ledger,
     outcome: state.outcome,
     fresh: Boolean(args.fresh),
-    touched: state.touched
+    touched: state.touched,
+    seconds: state.exec?.seconds ?? null
   });
   state.fixes.push({
     n: fixRoundN,

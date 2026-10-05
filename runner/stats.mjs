@@ -31,21 +31,26 @@ for (const file of files) {
 
   const fixesCount = Array.isArray(state.fixes) ? state.fixes.length : 0;
 
-  const execSec = (state.exec && typeof state.exec.seconds === "number") ? state.exec.seconds : 0;
+  const hasRounds = Array.isArray(state.rounds) && state.rounds.length > 0;
+  const roundSecs = hasRounds ? state.rounds.filter((r) => typeof r.seconds === "number") : [];
+  const execSec = roundSecs.length > 0
+    ? roundSecs.reduce((sum, r) => sum + r.seconds, 0)
+    : (state.exec && typeof state.exec.seconds === "number" ? state.exec.seconds : 0);
   const outcome = state.outcome || "unknown";
 
   let fresh = 0;
   let cached = 0;
   let out = 0;
   let hasTokens = false;
-  if (Array.isArray(state.ledger)) {
-    for (const row of state.ledger) {
-      if (row && (row.role === "exec" || (!row.role && !row.file?.startsWith("codex-review-")))) {
-        hasTokens = true;
-        fresh += row.fresh || 0;
-        cached += row.cached || 0;
-        out += row.out || 0;
-      }
+  const ledgerRows = hasRounds
+    ? state.rounds.flatMap((r) => Array.isArray(r.ledger) ? r.ledger : [])
+    : (Array.isArray(state.ledger) ? state.ledger : []);
+  for (const row of ledgerRows) {
+    if (row && (row.role === "exec" || (!row.role && !row.file?.startsWith("codex-review-")))) {
+      hasTokens = true;
+      fresh += row.fresh || 0;
+      cached += row.cached || 0;
+      out += row.out || 0;
     }
   }
 
