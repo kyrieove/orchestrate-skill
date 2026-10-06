@@ -79,7 +79,7 @@ No rm, no git push
   const baseEnv = {
     ...process.env,
     ORCH_RUNNER_LIVE_DIR: tempLive,
-    ORCH_CODEX_FALLBACK_FILE: `${tempLive}/codex-fallback`,
+    ORCH_AGY_FALLBACK_FILE: `${tempLive}/agy-fallback`,
     ORCH_QUOTA_SCRIPT: `${tempLive}/no-quota.mjs`
   };
 
@@ -992,27 +992,31 @@ No rm, no git push
     passedCount++;
   }
 
-  // Case Y (switch on): codex-fallback "on" + --executor luna → the codex places go to wb; risk medium → the fake
-  // codebuddy exec replies STATUS: done and its review replies VERDICT: PASS → review_pass on wb's model.
+  // Case Y: agy-fallback "on" + --executor agy, risk medium, fake codebuddy for exec, ORCH_RUNNER_FAKE_REVIEW for review:
+  // review_pass, exactly 1 codebuddy call with --model deepseek-v4.1-flash, state.execViaWb === true, state.review.model === "gpt-6-luna".
   {
     resetRepo();
-    fs.writeFileSync(`${tempLive}/codex-fallback`, "on\n");
+    fs.writeFileSync(`${tempLive}/agy-fallback`, "on\n");
     writeCard(undefined, "medium");
-    const resY = runCard("case-y", { risk: "medium", env: wbEnv, args: ["--executor", "luna"] });
+    const envY = {
+      ...wbEnv,
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md"
+    };
+    const resY = runCard("case-y", { risk: "medium", env: envY, args: ["--executor", "agy"] });
 
     assert.strictEqual(resY.status, 0, `Case Y exit status was ${resY.status}: ${resY.stderr}`);
     const stateY = readState("case-y");
     assert.strictEqual(stateY.outcome, "review_pass");
     assert.strictEqual(stateY.exec.status, "done");
-    assert.strictEqual(stateY.review.model, "deepseek-v4.1-flash");
+    assert.strictEqual(stateY.execViaWb, true);
+    assert.strictEqual(stateY.review.model, "gpt-6-luna");
     const reviewY = fs.readFileSync(path.join(tempRepo, "docs/orch/t/review.md"), "utf8").split(/\r?\n/)[0].trim();
     assert.strictEqual(reviewY, "VERDICT: PASS");
-    // Both wb calls (exec and review) passed the model to codebuddy itself, not only in the echoed first line.
     const argvY = fs.readFileSync(`${fakeBin}/argv`, "utf8").trim().split("\n");
-    assert.strictEqual(argvY.length, 2, `expected 2 codebuddy calls, got: ${argvY.join(" | ")}`);
-    assert.ok(argvY.every((a) => a.includes("--model deepseek-v4.1-flash")), `codebuddy argv lacks the model: ${argvY.join(" | ")}`);
+    assert.strictEqual(argvY.length, 1, `expected 1 codebuddy call, got: ${argvY.join(" | ")}`);
+    assert.ok(argvY[0].includes("--model deepseek-v4.1-flash"), `codebuddy argv lacks the model: ${argvY[0]}`);
     fs.rmSync(`${fakeBin}/argv`, { force: true });
-    fs.rmSync(`${tempLive}/codex-fallback`, { force: true });
+    fs.rmSync(`${tempLive}/agy-fallback`, { force: true });
     passedCount++;
   }
 
@@ -1029,75 +1033,128 @@ No rm, no git push
     passedCount++;
   }
 
-  // Case Q (quota precheck, switch "off"): a medium-risk card with the fake quota script reporting the 5h window full → exit 2 and
-  // the switch line, no state file; with the switch on the precheck is skipped and the medium case runs the fake review.
+  // Case Q: --executor luna with the codex-full quota script and no fallback file: exit 2, stderr has
+  // codex quota used up (5h 100%, 7d 40% and pick another executor, no state file.
   {
     resetRepo();
     writeCard(undefined, "medium");
     fs.writeFileSync(`${tempLive}/quota-full.mjs`, 'console.log(JSON.stringify({ codex: { five: { pct: 100, resetMs: Date.now() + 3600000 }, week: { pct: 40, resetMs: Date.now() + 86400000 } } }))', "utf8");
-    const env = {
+    const envQ = {
       ...baseEnv,
       ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
       ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md",
       ORCH_QUOTA_SCRIPT: `${tempLive}/quota-full.mjs`
     };
+    fs.rmSync(`${tempLive}/agy-fallback`, { force: true });
 
-    const offFile = `${tempLive}/quota-fallback-off`;
-    fs.writeFileSync(offFile, "off", "utf8");
-    const res = runCard("case-q", { risk: "medium", env: { ...env, ORCH_CODEX_FALLBACK_FILE: offFile } });
-    fs.rmSync(offFile, { force: true });
+    const res = runCard("case-q", { risk: "medium", env: envQ, args: ["--executor", "luna"] });
 
     assert.strictEqual(res.status, 2, `Case Q exit status was ${res.status}: ${res.stderr}`);
     assert.ok(res.stderr.includes("codex quota used up (5h 100%, 7d 40%"), `Case Q stderr should carry the quota line: ${res.stderr}`);
-    assert.ok(res.stderr.includes("switch codex to wb"), `Case Q stderr should mention the switch: ${res.stderr}`);
+    assert.ok(res.stderr.includes("pick another executor"), `Case Q stderr should mention picking another executor: ${res.stderr}`);
     const stateFileQ = path.join(tempLive, "orch-runner", "case-q.json");
     assert.strictEqual(fs.existsSync(stateFileQ), false, "State file must not exist for case-q");
-
-    const fallbackFile = `${tempLive}/quota-fallback-on`;
-    fs.writeFileSync(fallbackFile, "on\n", "utf8");
-    const env2 = { ...env, ORCH_CODEX_FALLBACK_FILE: fallbackFile };
-    const res2 = runCard("case-q2", { risk: "medium", env: env2 });
-
-    assert.strictEqual(res2.status, 0, `Case Q2 exit status was ${res2.status}: ${res2.stderr}`);
-    fs.rmSync(fallbackFile, { force: true });
-
-    // Case Q3 (auto, no switch file): quota full → no exit 2, the review goes to wb.
-    const res3 = runCard("case-q3", { risk: "medium", env });
-    assert.strictEqual(res3.status, 0, `Case Q3 exit status was ${res3.status}: ${res3.stderr}`);
-    assert.strictEqual(readState("case-q3").review.model, "deepseek-v4.1-flash", "Case Q3 review should fall back to wb");
     passedCount++;
   }
 
-  // Case R (wb review guard): codex-fallback "on" + --executor luna, risk medium; the fake codebuddy's review branch
-  // writes wrote.txt in the repo before replying VERDICT: PASS → review_error with review.wrote = ["wrote.txt"].
+  // Case Q2: --executor agy (fake exec), risk medium, codex-full quota script: exit 0, outcome review_pending,
+  // review.verdict === "pending", the fake review never ran (its marker file absent), summary stdout contains review: pending.
   {
     resetRepo();
     writeCard(undefined, "medium");
-    fs.writeFileSync(`${tempLive}/codex-fallback`, "on\n");
-    const fakeBin2 = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-bin-")).replaceAll("\\", "/");
-    try {
-      fs.writeFileSync(path.join(fakeBin2, "codebuddy"),
-        `#!/bin/sh\nprintf '%s\\n' "$*" >> "${fakeBin2}/argv"\ncase "$*" in\n  *disallowedTools*) echo x > wrote.txt; cat <<'EOF'\n${stream("VERDICT: PASS")}\nEOF\n  ;;\n  *) cat <<'EOF'\n${stream("STATUS: done")}\nEOF\n  ;;\nesac\n`,
-        { mode: 0o755 });
+    const marker = path.join(tempLive, "q2-review-ran").replaceAll("\\", "/");
+    fs.rmSync(marker, { force: true });
+    const envQ2 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: `node -e "require('fs').writeFileSync('${marker}','')"; printf 'VERDICT: PASS\\n' > docs/orch/t/review.md`,
+      ORCH_QUOTA_SCRIPT: `${tempLive}/quota-full.mjs`
+    };
 
-      const resR = runCard("case-r", { risk: "medium", env: { ...wbEnv, PATH: `${fakeBin2}${path.delimiter}${process.env.PATH}` }, args: ["--executor", "luna"] });
+    const res2 = runCard("case-q2", { risk: "medium", env: envQ2, args: ["--executor", "agy"] });
 
-      assert.strictEqual(resR.status, 0, `Case R exit status was ${resR.status}: ${resR.stderr}`);
-      const stateR = readState("case-r");
-      assert.strictEqual(stateR.outcome, "review_error");
-      assert.deepStrictEqual(stateR.review.wrote, ["wrote.txt"]);
-      passedCount++;
-    } finally {
-      fs.rmSync(fakeBin2, { recursive: true, force: true });
-      fs.rmSync(`${tempLive}/codex-fallback`, { force: true });
-    }
+    assert.strictEqual(res2.status, 0, `Case Q2 exit status was ${res2.status}: ${res2.stderr}`);
+    const stateQ2 = readState("case-q2");
+    assert.strictEqual(stateQ2.outcome, "review_pending");
+    assert.strictEqual(stateQ2.review.verdict, "pending");
+    assert.strictEqual(fs.existsSync(marker), false, "fake review must not run when codex quota is full");
+    assert.ok(res2.stdout.includes("review: pending"), `stdout should contain 'review: pending', got: ${res2.stdout}`);
+    passedCount++;
   }
 
-  if (passedCount === 28) {
-    console.log("28/28 passed");
+  // Case Q3: risk medium, quota script missing, ORCH_RUNNER_FAKE_REVIEW = echo 'Error: usage limit reached'; exit 1:
+  // outcome review_pending.
+  {
+    resetRepo();
+    writeCard(undefined, "medium");
+    const envQ3 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "echo 'Error: usage limit reached'; exit 1",
+      ORCH_QUOTA_SCRIPT: `${tempLive}/missing-quota.mjs`
+    };
+
+    const res3 = runCard("case-q3", { risk: "medium", env: envQ3, args: ["--executor", "agy"] });
+
+    assert.strictEqual(res3.status, 0, `Case Q3 exit status was ${res3.status}: ${res3.stderr}`);
+    const stateQ3 = readState("case-q3");
+    assert.strictEqual(stateQ3.outcome, "review_pending");
+    passedCount++;
+  }
+
+  // Case Q4 (new): agy-fallback absent (= auto), quota script reporting antigravity 5h at 100% and codex at 10%,
+  // --executor agy, risk low, fake codebuddy exec: state.execViaWb === true, 1 codebuddy call.
+  {
+    resetRepo();
+    writeCard();
+    fs.rmSync(`${tempLive}/agy-fallback`, { force: true });
+    fs.rmSync(`${fakeBin}/argv`, { force: true });
+    fs.writeFileSync(`${tempLive}/quota-agy-full.mjs`, 'console.log(JSON.stringify({ antigravity: { five: { pct: 100, resetMs: Date.now() + 3600000 }, week: { pct: 20, resetMs: Date.now() + 86400000 } }, codex: { five: { pct: 10, resetMs: Date.now() + 3600000 }, week: { pct: 10, resetMs: Date.now() + 86400000 } } }))', "utf8");
+    const envQ4 = {
+      ...wbEnv,
+      ORCH_QUOTA_SCRIPT: `${tempLive}/quota-agy-full.mjs`
+    };
+    delete envQ4.ORCH_RUNNER_FAKE_EXEC;
+    delete envQ4.ORCH_RUNNER_FAKE_REVIEW;
+
+    const res4 = runCard("case-q4", { risk: "low", env: envQ4, args: ["--executor", "agy"] });
+
+    assert.strictEqual(res4.status, 0, `Case Q4 exit status was ${res4.status}: ${res4.stderr}`);
+    const stateQ4 = readState("case-q4");
+    assert.strictEqual(stateQ4.execViaWb, true);
+    assert.strictEqual(stateQ4.outcome, "passed_no_review");
+    const argvQ4 = fs.readFileSync(`${fakeBin}/argv`, "utf8").trim().split("\n");
+    assert.strictEqual(argvQ4.length, 1, `expected 1 codebuddy call, got: ${argvQ4.join(" | ")}`);
+    fs.rmSync(`${fakeBin}/argv`, { force: true });
+    passedCount++;
+  }
+
+  // Case Q5 (new): risk high, --reviewer luna, fake exec + fake review PASS:
+  // state.review.model === "gpt-6.1-sol", state.review.raised === true, summary contains floor sol.
+  {
+    resetRepo();
+    writeCard(undefined, "high");
+    const envQ5 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md"
+    };
+
+    const res5 = runCard("case-q5", { risk: "high", env: envQ5, args: ["--reviewer", "luna"] });
+
+    assert.strictEqual(res5.status, 0, `Case Q5 exit status was ${res5.status}: ${res5.stderr}`);
+    const stateQ5 = readState("case-q5");
+    assert.strictEqual(stateQ5.review.model, "gpt-6.1-sol");
+    assert.strictEqual(stateQ5.review.raised, true);
+    assert.ok(res5.stdout.includes("floor sol"), `stdout should contain 'floor sol', got: ${res5.stdout}`);
+    passedCount++;
+  }
+
+  if (passedCount === 31) {
+    console.log("31/31 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/28 passed`);
+    console.error(`Only ${passedCount}/31 passed`);
     process.exitCode = 1;
   }
 } finally {

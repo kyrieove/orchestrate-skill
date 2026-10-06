@@ -7,32 +7,32 @@ export const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
 export const WB_MODEL = "deepseek-v4.1-flash";
 export const wbCmd = (prompt, extra = "") => `codebuddy -p ${q(prompt)} --model ${WB_MODEL} --effort high -y${extra}`;
 
-// "on": codex's places (luna, sol, review) always go to wb; "off": always codex; anything else or missing = "auto":
-// wb only while codex's quota is used up, checked at each call (dispatch and review separately).
-export const CODEX_FALLBACK_FILE = process.env.ORCH_CODEX_FALLBACK_FILE || "C:/Users/ASUS/.claude/skills/orchestrate/codex-fallback";
-export function codexMode() {
+// "on": agy cards run on wb; "off": always agy; anything else or missing = "auto":
+// wb only while antigravity's quota is full, checked once at dispatch.
+export const AGY_FALLBACK_FILE = process.env.ORCH_AGY_FALLBACK_FILE || "C:/Users/ASUS/.claude/skills/orchestrate/agy-fallback";
+export function agyMode() {
   let mode = "auto";
-  try { mode = fs.readFileSync(CODEX_FALLBACK_FILE, "utf8").trim(); } catch {}
+  try { mode = fs.readFileSync(AGY_FALLBACK_FILE, "utf8").trim(); } catch {}
   return mode === "on" || mode === "off" ? mode : "auto";
 }
 
-// Returns { five, week, full } from the quota script, or null when it is missing or fails (never blocks codex).
-export function codexQuota() {
+// key: "codex" | "antigravity". Returns { five, week, full } or null when the script is missing or fails.
+export function quotaOf(key) {
   const quotaScript = process.env.ORCH_QUOTA_SCRIPT || "D:/2/dev/token-weather-quotas/hooks/quota.mjs";
   if (!fs.existsSync(quotaScript)) return null;
   try {
     const res = spawnSync(process.execPath, [quotaScript], { encoding: "utf8", timeout: 45000 });
     if (res.status !== 0) return null;
     const quota = JSON.parse(res.stdout);
-    const five = quota.codex?.five ?? null;
-    const week = quota.codex?.week ?? null;
+    const five = quota[key]?.five ?? null;
+    const week = quota[key]?.week ?? null;
     return { five, week, full: (five !== null && five.pct >= 100) || (week !== null && week.pct >= 100) };
   } catch { return null; }
 }
 
-export function codexFallback() {
-  const mode = codexMode();
-  return mode === "on" || (mode === "auto" && codexQuota()?.full === true);
+export function agyFallback() {
+  const m = agyMode();
+  return m === "on" || (m === "auto" && quotaOf("antigravity")?.full === true);
 }
 
 export function runBash(cmd, { cwd, timeoutMin, exitPath }) {

@@ -12,7 +12,7 @@ export function formatLedgerLines(ledger, sep = "\n") {
 export function appendAcceptanceDraft(ctx) {
   const { state, cardAbs, check, risk } = ctx;
 
-  const draftOutcomes = new Set(["review_pass", "passed_no_review", "fix_passed", "recon_done"]);
+  const draftOutcomes = new Set(["review_pass", "passed_no_review", "fix_passed", "recon_done", "review_pending"]);
   if (draftOutcomes.has(state.outcome)) {
     const currentCardText = fs.readFileSync(cardAbs, "utf8");
     const cLines = currentCardText.split(/\r?\n/);
@@ -50,9 +50,12 @@ export function appendAcceptanceDraft(ctx) {
     }
 
     const reviewerStr = state.review?.model || "no review";
+    const verdictLine = state.outcome === "review_pending"
+      ? "- verdict: review pending (codex quota used up) — TODO accept provisionally"
+      : "- verdict: TODO (accepted / review pending / rejected)";
     const draftSection = [
       "## Acceptance (draft)",
-      "- verdict: TODO (accepted / review pending / rejected)",
+      verdictLine,
       `- files: ${allTouchedList}`,
       checkLine,
       "- tokens:",

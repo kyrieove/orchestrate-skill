@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { q, runBash, wbCmd, WB_MODEL, codexFallback } from "./lib.mjs";
-import { snapshot } from "./snapshot.mjs";
+import { q, runBash, quotaOf } from "./lib.mjs";
 
 export async function runReview(ctx) {
   const {
@@ -20,21 +19,19 @@ export async function runReview(ctx) {
   } = ctx;
 
   state.stage = "reviewing";
-  let reviewer;
-  if (args.reviewer) {
-    reviewer = args.reviewer === "sol" ? "gpt-6.1-sol" : "gpt-6-luna";
-  } else if (executor === "luna" || executor === "sol") {
-    reviewer = "gpt-6.1-sol";
-  } else if (risk === "high") {
-    reviewer = "gpt-6.1-sol";
-  } else {
-    reviewer = "gpt-6-luna";
-  }
+  const floorSol = executor === "luna" || executor === "sol" || risk === "high" || args.reviewer === "sol";
+  const reviewer = floorSol ? "gpt-6.1-sol" : "gpt-6-luna";
 
-  const wb = codexFallback();
-  if (wb) reviewer = WB_MODEL;
-  const preReview = wb ? snapshot(repoAbs, isGit) : null;
   state.review = { model: reviewer, verdict: null };
+  if (args.reviewer === "luna" && floorSol) state.review.raised = true;
+
+  if (quotaOf("codex")?.full) {
+    state.outcome = "review_pending";
+    state.review.verdict = "pending";
+    state.review.reason = "codex quota used up";
+    save(state);
+    return;
+  }
   save(state);
 
   let reviewPrompt;
@@ -70,19 +67,11 @@ export async function runReview(ctx) {
     let reviewCmd;
     if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
       reviewCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} ${redir} ${q(reviewStream)} 2>&1`;
-    } else if (wb) {
-      reviewCmd = `{ echo '{"model":"${reviewer}"}'; ${wbCmd(reviewPrompt, " --disallowedTools Write,Edit,NotebookEdit --output-format stream-json")} < /dev/null; } ${redir} ${q(reviewStream)} 2>&1`;
     } else {
       reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } ${redir} ${q(reviewStream)} 2>&1`;
     }
 
     const reviewRes = await runBash(reviewCmd, { cwd: repoAbs, timeoutMin: remainingMin(), exitPath: reviewExit });
-    // wb streams JSON (so its lane shows progress); review.md gets the text of the newest result line.
-    if (wb && fs.existsSync(reviewStream)) {
-      const result = fs.readFileSync(reviewStream, "utf8").split("\n").reverse()
-        .map((l) => { try { return JSON.parse(l); } catch { return null; } }).find((o) => o?.type === "result");
-      if (result) fs.writeFileSync(reviewMdAbs, result.result ?? "", "utf8");
-    }
 
     if (reviewRes.timedOut) {
       state.outcome = "interrupted";
@@ -91,8 +80,19 @@ export async function runReview(ctx) {
     }
 
     if (reviewRes.exit !== 0) {
-      state.outcome = "review_error";
-      state.review.verdict = "error";
+      let streamText = "";
+      if (fs.existsSync(reviewStream)) {
+        // Tail only: the reviewer's own text earlier in the stream can mention "quota".
+        try { streamText = fs.readFileSync(reviewStream, "utf8").slice(-2000); } catch {}
+      }
+      if (/usage limit|quota|rate.?limit|\b429\b/i.test(streamText)) {
+        state.outcome = "review_pending";
+        state.review.verdict = "pending";
+        state.review.reason = "codex quota used up";
+      } else {
+        state.outcome = "review_error";
+        state.review.verdict = "error";
+      }
       save(state);
       break;
     }
@@ -119,19 +119,6 @@ export async function runReview(ctx) {
     if (attempt === 1) {
       state.outcome = "review_error";
       state.review.verdict = firstLine || "error";
-      save(state);
-    }
-  }
-
-  if (preReview) {
-    const post = snapshot(repoAbs, isGit);
-    const own = path.posix.join(taskDir, "review.md").replaceAll("\\", "/");
-    const wrote = [...new Set([...Object.keys(preReview), ...Object.keys(post)])]
-      .filter((p) => p !== own && JSON.stringify(preReview[p]) !== JSON.stringify(post[p])).sort();
-    if (wrote.length) {
-      state.outcome = "review_error";
-      state.review.verdict = "error";
-      state.review.wrote = wrote;
       save(state);
     }
   }

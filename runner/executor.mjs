@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { q, runBash, wbCmd, WB_MODEL, codexFallback } from "./lib.mjs";
+import { q, runBash, wbCmd, WB_MODEL, agyFallback } from "./lib.mjs";
 import { getReadOnlyDiff } from "./snapshot.mjs";
 
 export async function runExecutor(ctx) {
@@ -38,14 +38,16 @@ export async function runExecutor(ctx) {
   const S = path.posix.join(liveDir, `${progressPrefix}-${name}.jsonl`);
   const E = S.replace(/\.jsonl$/, ".exit");
 
+  state.execViaWb = !process.env.ORCH_RUNNER_FAKE_EXEC && executor === "agy" && agyFallback();
+
   let execCmd;
   if (process.env.ORCH_RUNNER_FAKE_EXEC) {
     execCmd = `{\n${process.env.ORCH_RUNNER_FAKE_EXEC}\n} > ${q(S)} 2>&1`;
+  } else if (executor === "wb" || state.execViaWb) {
+    execCmd = `{ echo '{"model":"${WB_MODEL}"}'; ${wbCmd(execPrompt, " --output-format stream-json")} < /dev/null; } > ${q(S)} 2>&1`;
   } else if (executor === "agy") {
     const convArg = (state.conversationId && !args.fresh) ? ` --conversation ${state.conversationId}` : "";
     execCmd = `C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p ${q(execPrompt)} --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format stream-json${convArg} > ${q(S)} 2>&1`;
-  } else if (executor === "wb" || (state.execViaWb = codexFallback())) {
-    execCmd = `{ echo '{"model":"${WB_MODEL}"}'; ${wbCmd(execPrompt, " --output-format stream-json")} < /dev/null; } > ${q(S)} 2>&1`;
   } else {
     const model = executor === "luna" ? "gpt-6-luna" : "gpt-6.1-sol";
     execCmd = `{ echo '{"model":"${model}"}'; codex exec --approve-for-me${isGit ? "" : " --skip-git-repo-check"} -m ${model} -C ${q(repoAbs)} --json ${q(execPrompt)} < /dev/null; } > ${q(S)} 2>&1`;
@@ -70,7 +72,7 @@ export async function runExecutor(ctx) {
         for (let i = lines.length - 1; i >= 0; i--) {
           try {
             const obj = JSON.parse(lines[i]);
-            if (executor === "agy") {
+            if (executor === "agy" && !state.execViaWb) {
               if (obj.event === "result") {
                 reply = obj.result?.response ?? (typeof obj.result === "string" ? obj.result : JSON.stringify(obj.result));
                 state.conversationId = obj.result?.conversation_id ?? null;
