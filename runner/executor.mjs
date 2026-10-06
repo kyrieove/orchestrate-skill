@@ -44,7 +44,7 @@ export async function runExecutor(ctx) {
   } else if (executor === "agy") {
     const convArg = (state.conversationId && !args.fresh) ? ` --conversation ${state.conversationId}` : "";
     execCmd = `C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p ${q(execPrompt)} --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format stream-json${convArg} > ${q(S)} 2>&1`;
-  } else if (executor === "wb" || codexFallback()) {
+  } else if (executor === "wb" || (state.execViaWb = codexFallback())) {
     execCmd = `{ echo '{"model":"${WB_MODEL}"}'; ${wbCmd(execPrompt, " --output-format stream-json")} < /dev/null; } > ${q(S)} 2>&1`;
   } else {
     const model = executor === "luna" ? "gpt-6-luna" : "gpt-6.1-sol";

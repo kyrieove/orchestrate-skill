@@ -4,7 +4,7 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { q, runBash, codexFallback } from "./lib.mjs";
+import { q, runBash, codexMode, codexQuota } from "./lib.mjs";
 import { parseArgs, getSection, lintCard, isJunkPath } from "./card.mjs";
 import { snapshot, statTree, getReadOnlyDiff } from "./snapshot.mjs";
 import { runCommit } from "./commit.mjs";
@@ -121,27 +121,15 @@ if (args.reviewer !== undefined && !["luna", "sol"].includes(args.reviewer)) {
   process.exit(2);
 }
 
-// Refuse to start a card that needs codex while codex's quota is used up. A missing or failing quota script never blocks.
-const needsCodex = !args.commit && !codexFallback() && (["luna", "sol"].includes(executor) || (!isFix && !recon && risk !== "low"));
-if (needsCodex) {
-  const quotaScript = process.env.ORCH_QUOTA_SCRIPT || "D:/2/dev/token-weather-quotas/hooks/quota.mjs";
-  if (fs.existsSync(quotaScript)) {
-    try {
-      const quotaRes = spawnSync(process.execPath, [quotaScript], { encoding: "utf8", timeout: 45000 });
-      if (quotaRes.status === 0) {
-        const quota = JSON.parse(quotaRes.stdout);
-        const five = quota.codex?.five ?? null;
-        const week = quota.codex?.week ?? null;
-        const fiveFull = five !== null && five.pct >= 100;
-        const weekFull = week !== null && week.pct >= 100;
-        if (fiveFull || weekFull) {
-          const when = new Date((fiveFull ? five : week).resetMs).toLocaleString("zh-CN", { hour12: false });
-          console.error(`codex quota used up (5h ${five?.pct ?? "-"}%, 7d ${week?.pct ?? "-"}%, resets ${when}): ask the user whether to switch codex to wb (SKILL.md "Codex → wb switch")`);
-          process.exit(2);
-        }
-      }
-    } catch {}
-  }
+// Codex forced "off" (no wb fallback): refuse to start a card that needs codex while its quota is used up.
+// In "auto" the codex places go to wb instead (lib.mjs codexFallback). A missing or failing quota script never blocks.
+const needsCodex = !args.commit && codexMode() === "off" && (["luna", "sol"].includes(executor) || (!isFix && !recon && risk !== "low"));
+const quota = needsCodex ? codexQuota() : null;
+if (quota?.full) {
+  const { five, week } = quota;
+  const when = new Date((five?.pct >= 100 ? five : week).resetMs).toLocaleString("zh-CN", { hour12: false });
+  console.error(`codex quota used up (5h ${five?.pct ?? "-"}%, 7d ${week?.pct ?? "-"}%, resets ${when}): ask the user whether to switch codex to wb (SKILL.md "Codex → wb switch")`);
+  process.exit(2);
 }
 
 let timeoutMin = 100;
@@ -641,7 +629,7 @@ lines.push(`ORCH-RUNNER ${name} outcome=${state.outcome} risk=${risk}`);
 const execExit = state.exec?.exit !== null && state.exec?.exit !== undefined ? state.exec.exit : "n/a";
 const execStatus = state.exec?.status ?? "n/a";
 const execMins = state.exec?.seconds != null ? (state.exec.seconds / 60).toFixed(1) : "0.0";
-lines.push(`executor: ${executor} exit=${execExit} status=${execStatus} ${execMins}m`);
+lines.push(`executor: ${executor}${state.execViaWb ? ` → wb deepseek-v4.1-flash (codex fallback)` : ""} exit=${execExit} status=${execStatus} ${execMins}m`);
 
 const touchedStr = state.touched && state.touched.length > 0 ? state.touched.join(", ") : "-";
 const nonJunkOutOfScope = (state.outOfScope || []).filter((p) => !isJunkPath(p));

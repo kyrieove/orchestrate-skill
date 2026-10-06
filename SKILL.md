@@ -30,11 +30,13 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 the user rated wb above agy after 4 cards. Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its
 misses (2026-10-04: sol spent 4.5 M tokens executing the Cartool port, against 0.2–0.3 M for a typical agy card).
 
-**Codex → wb switch** (manual, user 2026-10-05): while `~/.claude/skills/orchestrate/codex-fallback` reads `on`,
-the runner sends every codex place — luna, sol and every review — to wb on `deepseek-v4.1-flash`; agy is
-unaffected. Always flash, never another DeepSeek model (user). Codex unreachable or out of quota → stop, tell the
-user and ask in one line whether to switch codex to wb. Only when the user says so in chat (e.g. "codex 换 wb" /
-"切回 codex"), write `on` / `off` to that file and say which it is now; never switch on your own.
+**Codex → wb switch** (`~/.claude/skills/orchestrate/codex-fallback`; automatic since user 2026-10-06): `auto`
+(default, also when missing) → the runner checks codex's quota at dispatch and again at review, and sends that codex
+place — luna, sol or the review — to wb on `deepseek-v4.1-flash` only while the 5h or 7d window is full; the summary's
+`executor:` line says `→ wb` when it fell back. `on` → always wb; `off` → always codex (quota full → exit 2). agy is
+unaffected. Always flash, never another DeepSeek model (user). Write `on` / `off` / `auto` only when the user says so
+in chat (e.g. "codex 换 wb" / "切回 codex" / "自动切换"), and say which it is now. Before a dispatch that names luna or
+sol, glance at the file: not `auto` → tell the user in one line.
 
 Natural language: naming one executor ("让 / 交给 / 只让 agy|luna|sol|wb 干") → that fixed mode; "交给 codex"
 without a model → `/orch`, choosing luna; plain 派活 / 分工 / 编排 → `/orch`. A slash
@@ -46,8 +48,8 @@ other codex model → ask, stating the concrete job. agy's model is fixed.
 - fixed modes (`/agy`, `/luna`, `/sol`, `/wb`) → stop and tell the user; never switch executor on your own.
 - `/orch` → ask the user which other executor to use, naming the job. Claude still doesn't implement.
 
-**Reviewer out of quota.** Known before the start (the runner's quota precheck exits 2 with `codex quota used up`)
-→ ask the user about the Codex → wb switch; no provisional acceptance. Only when codex runs out during the review
+**Reviewer out of quota.** Known before the start: `auto` falls back to wb by itself; with the switch `off` the
+precheck exits 2 with `codex quota used up` → ask the user about the switch; no provisional acceptance. Only when codex runs out during the review
 (`review_error` with quota text): do not replace the conformance review with a Claude line-by-line read. Accept
 provisionally as `review pending` (in `## Acceptance` and the project log), and run the codex review when
 quota returns. High risk: may be committed but marked `unreviewed`; its numbers don't go into the paper
@@ -103,7 +105,7 @@ conformance review catches a wrong number; only an independent recompute does.
    node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl
    ```
    Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
-   command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` → ask the user about the Codex → wb switch), snapshots git status + content
+   command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` only when the switch is `off`), snapshots git status + content
    hashes, runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
    prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file

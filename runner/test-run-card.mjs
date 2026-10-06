@@ -1029,7 +1029,7 @@ No rm, no git push
     passedCount++;
   }
 
-  // Case Q (quota precheck): a medium-risk card with the fake quota script reporting the 5h window full → exit 2 and
+  // Case Q (quota precheck, switch "off"): a medium-risk card with the fake quota script reporting the 5h window full → exit 2 and
   // the switch line, no state file; with the switch on the precheck is skipped and the medium case runs the fake review.
   {
     resetRepo();
@@ -1042,7 +1042,10 @@ No rm, no git push
       ORCH_QUOTA_SCRIPT: `${tempLive}/quota-full.mjs`
     };
 
-    const res = runCard("case-q", { risk: "medium", env });
+    const offFile = `${tempLive}/quota-fallback-off`;
+    fs.writeFileSync(offFile, "off", "utf8");
+    const res = runCard("case-q", { risk: "medium", env: { ...env, ORCH_CODEX_FALLBACK_FILE: offFile } });
+    fs.rmSync(offFile, { force: true });
 
     assert.strictEqual(res.status, 2, `Case Q exit status was ${res.status}: ${res.stderr}`);
     assert.ok(res.stderr.includes("codex quota used up (5h 100%, 7d 40%"), `Case Q stderr should carry the quota line: ${res.stderr}`);
@@ -1057,6 +1060,11 @@ No rm, no git push
 
     assert.strictEqual(res2.status, 0, `Case Q2 exit status was ${res2.status}: ${res2.stderr}`);
     fs.rmSync(fallbackFile, { force: true });
+
+    // Case Q3 (auto, no switch file): quota full → no exit 2, the review goes to wb.
+    const res3 = runCard("case-q3", { risk: "medium", env });
+    assert.strictEqual(res3.status, 0, `Case Q3 exit status was ${res3.status}: ${res3.stderr}`);
+    assert.strictEqual(readState("case-q3").review.model, "deepseek-v4.1-flash", "Case Q3 review should fall back to wb");
     passedCount++;
   }
 
