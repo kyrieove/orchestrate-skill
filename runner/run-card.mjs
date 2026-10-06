@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { q, runBash, quotaOf } from "./lib.mjs";
 import { parseArgs, getSection, lintCard, isJunkPath } from "./card.mjs";
 import { snapshot, statTree, getReadOnlyDiff } from "./snapshot.mjs";
-import { runCommit } from "./commit.mjs";
+import { runCommit, runRecheck } from "./commit.mjs";
 import { runExecutor } from "./executor.mjs";
 import { runReview } from "./review.mjs";
 import { formatLedgerLines, appendAcceptanceDraft } from "./acceptance.mjs";
@@ -25,6 +25,7 @@ fs.mkdirSync(stateDir, { recursive: true });
 const MAX_BASE_BYTES = 1024 * 1024;
 
 if (args.commit) runCommit(args, { stateDir });
+if (args.recheck) await runRecheck(args, { stateDir });
 
 const isFix = args.fix !== undefined;
 const recon = !isFix && args.recon === true;
@@ -529,6 +530,15 @@ if (!state.outcome) {
     }
 
     const checkOutOfScope = scopeCheck();
+    if (!checkRes.timedOut) {
+      const paths = Array.from(new Set([...(state.allTouched || []), ...(state.touched || [])])).sort();
+      const checkedHashes = {};
+      for (const p of paths) {
+        checkedHashes[p] = state.after[p] ?? null;
+      }
+      state.checkedHashes = checkedHashes;
+      save(state);
+    }
     if (checkOutOfScope.length > 0 && state.outcome !== "readonly_violated") {
       state.outcome = "out_of_scope";
       save(state);

@@ -1385,11 +1385,138 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 33) {
-    console.log("33/33 passed");
+  // Case FR (check-freshness & recheck):
+  // (a) fake exec writes ok to a.txt, risk low → passed_no_review, state.checkedHashes["a.txt"] set;
+  // write Acceptance - verdict: accepted; then append a line to a.txt → --commit exits 2 with
+  // files changed after the last Check: a.txt; --recheck → exit 0, stdout recheck: exit=0; --commit → exit 0.
+  // (b) same start; overwrite a.txt with bad → --recheck exits 1 with recheck: exit=1;
+  // --commit exits 2 with the last Check failed (exit 1).
+  // (c) fake exec writes bad → check_failed; Acceptance - verdict: accepted + - claude fix: wrote ok
+  // but no recheck → --commit exits 2 with the last Check failed; write ok, --recheck → 0, --commit → 0.
+  // (d) --recheck with an unknown name → exit 2.
+  {
+    // (a)
+    resetRepo();
+    writeCard("grep -q ok a.txt", "low");
+    const envFRa = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo ok > a.txt; echo 'STATUS: done'"
+    };
+    delete envFRa.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resFRaRun = runCard("case-fr-a", { env: envFRa });
+    assert.strictEqual(resFRaRun.status, 0, `Case FR(a) run status was ${resFRaRun.status}: ${resFRaRun.stderr}`);
+    const stateFRa = readState("case-fr-a");
+    assert.strictEqual(stateFRa.outcome, "passed_no_review");
+    assert.ok(stateFRa.checkedHashes && stateFRa.checkedHashes["a.txt"], "state.checkedHashes['a.txt'] must be set");
+
+    const cardContentA = fs.readFileSync(cardPath, "utf8");
+    const withoutDraftA = cardContentA.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
+    fs.writeFileSync(cardPath, `${withoutDraftA}\n\n## Acceptance\n- verdict: accepted\n`, "utf8");
+
+    fs.appendFileSync(path.join(tempRepo, "a.txt"), "extra line\n", "utf8");
+
+    const resFRaCommit1 = runCard("case-fr-a", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resFRaCommit1.status, 2, `Expected exit 2 for Case FR(a) commit before recheck, got ${resFRaCommit1.status}`);
+    assert.ok(
+      resFRaCommit1.stderr.includes("files changed after the last Check: a.txt"),
+      `Case FR(a) commit stderr should contain 'files changed after the last Check: a.txt', got: ${resFRaCommit1.stderr}`
+    );
+
+    const resFRaRecheck = runCard("case-fr-a", { args: ["--recheck"] });
+    assert.strictEqual(resFRaRecheck.status, 0, `Expected exit 0 for Case FR(a) recheck, got ${resFRaRecheck.status}: ${resFRaRecheck.stderr}`);
+    assert.ok(
+      resFRaRecheck.stdout.includes("recheck: exit=0"),
+      `Case FR(a) recheck stdout should contain 'recheck: exit=0', got: ${resFRaRecheck.stdout}`
+    );
+
+    const resFRaCommit2 = runCard("case-fr-a", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resFRaCommit2.status, 0, `Expected exit 0 for Case FR(a) commit after recheck, got ${resFRaCommit2.status}: ${resFRaCommit2.stderr}`);
+
+    // (b)
+    resetRepo();
+    writeCard("grep -q ok a.txt", "low");
+    const envFRb = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo ok > a.txt; echo 'STATUS: done'"
+    };
+    delete envFRb.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resFRbRun = runCard("case-fr-b", { env: envFRb });
+    assert.strictEqual(resFRbRun.status, 0, `Case FR(b) run status was ${resFRbRun.status}: ${resFRbRun.stderr}`);
+    const stateFRb = readState("case-fr-b");
+    assert.strictEqual(stateFRb.outcome, "passed_no_review");
+    assert.ok(stateFRb.checkedHashes && stateFRb.checkedHashes["a.txt"], "state.checkedHashes['a.txt'] must be set");
+
+    const cardContentB = fs.readFileSync(cardPath, "utf8");
+    const withoutDraftB = cardContentB.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
+    fs.writeFileSync(cardPath, `${withoutDraftB}\n\n## Acceptance\n- verdict: accepted\n`, "utf8");
+
+    fs.writeFileSync(path.join(tempRepo, "a.txt"), "bad\n", "utf8");
+
+    const resFRbRecheck = runCard("case-fr-b", { args: ["--recheck"] });
+    assert.strictEqual(resFRbRecheck.status, 1, `Expected exit 1 for Case FR(b) recheck, got ${resFRbRecheck.status}`);
+    assert.ok(
+      resFRbRecheck.stdout.includes("recheck: exit=1"),
+      `Case FR(b) recheck stdout should contain 'recheck: exit=1', got: ${resFRbRecheck.stdout}`
+    );
+
+    const resFRbCommit = runCard("case-fr-b", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resFRbCommit.status, 2, `Expected exit 2 for Case FR(b) commit, got ${resFRbCommit.status}`);
+    assert.ok(
+      resFRbCommit.stderr.includes("the last Check failed (exit 1)"),
+      `Case FR(b) commit stderr should contain 'the last Check failed (exit 1)', got: ${resFRbCommit.stderr}`
+    );
+
+    // (c)
+    resetRepo();
+    writeCard("grep -q ok a.txt", "low");
+    const envFRc = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo bad > a.txt; echo 'STATUS: done'"
+    };
+    delete envFRc.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resFRcRun = runCard("case-fr-c", { env: envFRc });
+    assert.strictEqual(resFRcRun.status, 0, `Case FR(c) run status was ${resFRcRun.status}: ${resFRcRun.stderr}`);
+    const stateFRc = readState("case-fr-c");
+    assert.strictEqual(stateFRc.outcome, "check_failed");
+
+    const cardContentC = fs.readFileSync(cardPath, "utf8");
+    const withoutDraftC = cardContentC.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
+    fs.writeFileSync(cardPath, `${withoutDraftC}\n\n## Acceptance\n- verdict: accepted\n- claude fix: wrote ok\n`, "utf8");
+
+    const resFRcCommit1 = runCard("case-fr-c", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resFRcCommit1.status, 2, `Expected exit 2 for Case FR(c) commit before recheck, got ${resFRcCommit1.status}`);
+    assert.ok(
+      resFRcCommit1.stderr.includes("the last Check failed"),
+      `Case FR(c) commit stderr should contain 'the last Check failed', got: ${resFRcCommit1.stderr}`
+    );
+
+    fs.writeFileSync(path.join(tempRepo, "a.txt"), "ok\n", "utf8");
+
+    const resFRcRecheck = runCard("case-fr-c", { args: ["--recheck"] });
+    assert.strictEqual(resFRcRecheck.status, 0, `Expected exit 0 for Case FR(c) recheck, got ${resFRcRecheck.status}: ${resFRcRecheck.stderr}`);
+    assert.ok(
+      resFRcRecheck.stdout.includes("recheck: exit=0"),
+      `Case FR(c) recheck stdout should contain 'recheck: exit=0', got: ${resFRcRecheck.stdout}`
+    );
+
+    const resFRcCommit2 = runCard("case-fr-c", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resFRcCommit2.status, 0, `Expected exit 0 for Case FR(c) commit after recheck, got ${resFRcCommit2.status}: ${resFRcCommit2.stderr}`);
+
+    // (d)
+    const resFRd = runCard("case-fr-d-nonexistent", { args: ["--recheck"] });
+    assert.strictEqual(resFRd.status, 2, `Expected exit 2 for Case FR(d) unknown name, got ${resFRd.status}`);
+
+    passedCount++;
+  }
+
+  if (passedCount === 34) {
+    console.log("34/34 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/33 passed`);
+    console.error(`Only ${passedCount}/34 passed`);
     process.exitCode = 1;
   }
 } finally {

@@ -1,7 +1,7 @@
 import path from "node:path";
 
 export function parseArgs(args) {
-  const booleanFlags = new Set(["recon", "commit", "fresh"]);
+  const booleanFlags = new Set(["recon", "commit", "fresh", "recheck"]);
   const parsed = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
