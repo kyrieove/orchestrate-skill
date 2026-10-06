@@ -30,13 +30,12 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 the user rated wb above agy after 4 cards. Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its
 misses (2026-10-04: sol spent 4.5 M tokens executing the Cartool port, against 0.2–0.3 M for a typical agy card).
 
-**Codex → wb switch** (`~/.claude/skills/orchestrate/codex-fallback`; automatic since user 2026-10-06): `auto`
-(default, also when missing) → the runner checks codex's quota at dispatch and again at review, and sends that codex
-place — luna, sol or the review — to wb on `deepseek-v4.1-flash` only while the 5h or 7d window is full; the summary's
-`executor:` line says `→ wb` when it fell back. `on` → always wb; `off` → always codex (quota full → exit 2). agy is
-unaffected. Always flash, never another DeepSeek model (user). Write `on` / `off` / `auto` only when the user says so
-in chat (e.g. "codex 换 wb" / "切回 codex" / "自动切换"), and say which it is now. Before a dispatch that names luna or
-sol, glance at the file: not `auto` → tell the user in one line.
+**wb is agy's fallback, never a reviewer** (user 2026-10-06). Switch `~/.claude/skills/orchestrate/agy-fallback`:
+`auto` (default, also when missing) → at dispatch the runner checks the antigravity quota and runs an agy card on wb
+(`deepseek-v4.1-flash`) only while its 5h or 7d window is full; the summary's `executor:` line says `→ wb` when it fell
+back. `on` → agy cards always on wb; `off` → always agy. Write it only when the user says so in chat, and say which it
+is now. luna and sol never fall back: codex quota full → the runner exits 2 (`codex quota used up`) → tell the user.
+Always flash, never another DeepSeek model (user).
 
 Natural language: naming one executor ("让 / 交给 / 只让 agy|luna|sol|wb 干") → that fixed mode; "交给 codex"
 without a model → `/orch`, choosing luna; plain 派活 / 分工 / 编排 → `/orch`. A slash
@@ -48,9 +47,9 @@ other codex model → ask, stating the concrete job. agy's model is fixed.
 - fixed modes (`/agy`, `/luna`, `/sol`, `/wb`) → stop and tell the user; never switch executor on your own.
 - `/orch` → ask the user which other executor to use, naming the job. Claude still doesn't implement.
 
-**Reviewer out of quota.** Known before the start: `auto` falls back to wb by itself; with the switch `off` the
-precheck exits 2 with `codex quota used up` → ask the user about the switch; no provisional acceptance. Only when codex runs out during the review
-(`review_error` with quota text): do not replace the conformance review with a Claude line-by-line read. Accept
+**Reviewer out of quota.** Reviews run only on codex. Quota full when the review starts, or quota text when it dies →
+the runner ends `review_pending` (no wb, no Claude substitute). The reviewer tier is a floor: sol for luna/sol
+executors, high risk or `--reviewer sol`; `--reviewer luna` cannot lower it (summary says `floor sol`). On `review_pending`: do not replace the conformance review with a Claude line-by-line read. Accept
 provisionally as `review pending` (in `## Acceptance` and the project log), and run the codex review when
 quota returns. High risk: may be committed but marked `unreviewed`; its numbers don't go into the paper
 until the review passes. (2026-10-01: Claude's line-by-line review passed a card; the later sol review found 2 real
@@ -105,7 +104,7 @@ conformance review catches a wrong number; only an independent recompute does.
    node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl
    ```
    Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
-   command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` only when the switch is `off`), snapshots git status + content
+   command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` → luna/sol executor and codex quota full: tell the user), snapshots git status + content
    hashes, runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
    prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
@@ -125,7 +124,8 @@ conformance review catches a wrong number; only an independent recompute does.
    | `out_of_scope` | 🛑 show the files, the user decides (never auto-revert); `junk:` paths are deleted only after the user says so in one line |
    | `readonly_violated` | 🛑 show the changed read-only paths to the user |
    | `blocked`, `failed`, `interrupted` | read the reply / stream tail; executor failures follow **Executor fails** above |
-   | `review_error` | read the tail of `codex-review-<name>.jsonl`: quota / rate-limit text → **Reviewer out of quota** above; anything else (bad config, no VERDICT twice) → fix the cause and re-run the review — no provisional acceptance |
+   | `review_pending` | codex quota ran out: **Reviewer out of quota** above |
+   | `review_error` | read the tail of `codex-review-<name>.jsonl`: anything else (bad config, no VERDICT twice) → fix the cause and re-run the review — no provisional acceptance |
 5. **Fix.** A real finding whose fix is a few mechanical lines (a missing check, a wrong regex, a duplicate
    declaration): Claude fixes it directly — except in fixed modes or when the user asked Claude not to implement
    (same rule as **Who writes**) — re-runs the Check, and says so in Acceptance — an executor fix round costs
@@ -261,11 +261,9 @@ whole file. If the last line is not a result (crash, killed), read the last few 
 { echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: <paths from the before snapshot>. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each with file:line, the problem and the fix — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
 ```
 
-**wb executes / reviews** (`/wb`, or any codex place while the Codex → wb switch is on): the same two commands with
-`codebuddy` in place of `codex exec` — exec: `{ echo '{"model":"deepseek-v4.1-flash"}'; codebuddy -p "<same prompt>" --model deepseek-v4.1-flash --effort high -y --output-format stream-json < /dev/null; } > ~/.claude/agent-live/codex-<name>.jsonl 2>&1`;
-review: add `--disallowedTools Write,Edit,NotebookEdit` and write to `codex-review-<name>.jsonl`. The reply is the `result` field of
-the last `{"type":"result"}` line; for a review, save it as `<task dir>/review.md`. wb has no read-only sandbox: run
-`git status --short` before and after the review and treat any difference as a failed review.
+**wb executes** (`/wb`, or an agy card while agy's quota is full): the codex exec command with
+`codebuddy` in place of `codex exec` — exec: `{ echo '{"model":"deepseek-v4.1-flash"}'; codebuddy -p "<same prompt>" --model deepseek-v4.1-flash --effort high -y --output-format stream-json < /dev/null; } > ~/.claude/agent-live/codex-<name>.jsonl 2>&1`.
+The reply is the `result` field of the last `{"type":"result"}` line.
 
 Fill `<paths from the before snapshot>` from step 3 (2026-10-04: without it sol failed a card for the user's own earlier edits). Run the review in the background too.
 

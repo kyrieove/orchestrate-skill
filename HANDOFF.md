@@ -8,7 +8,7 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
 
 - 新执行者 `wb`：CodeBuddy CLI（`npm i -g @tencent-ai/codebuddy-code`，已登录），`deepseek-v4.1-flash` + `--effort high`；
   `/wb` 命令；`/orch` 每次先问「写代码交给 agy 还是 wb」。用户规定 DeepSeek 一律用 flash。
-- codex→wb 开关：文件 `codex-fallback`，`auto`（默认）= 派发和审查前各查一次 codex 额度，满了才走 wb flash；`on` 强制 wb，`off` 强制 codex。**现在是 `auto`**（2026-10-06 用户要求自动切换）。
+- wb（DeepSeek flash）只做 agy 的备选，不再审查（2026-10-06 用户）。开关 `agy-fallback`：`auto`（默认）= 派发时 agy 额度满才走 wb；`on` 强制 wb，`off` 强制 agy。**现在是 `auto`**。审查只走 codex，额度满 → `review_pending`；`--reviewer luna` 不能把 sol 档降下来。旧的 `codex-fallback` 文件已不再读取。
 - runner 新增：派活前 codex 额度预检（满了 exit 2）；`--fix` 大文件/忽略文件只记 size+mtime；wb 审查改动仓库 → `review_error`。
   测试 `node runner/test-run-card.mjs` → `28/28 passed`（假 codebuddy 覆盖 wb 执行和审查）。
 - 下一步：codex 恢复后用 sol 整体复审 `674d8a2..HEAD`（今天的审查都由 wb 自己做）；
