@@ -5,11 +5,11 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { q, runBash, quotaOf } from "./lib.mjs";
-import { parseArgs, getSection, lintCard, isJunkPath } from "./card.mjs";
+import { parseArgs, getSection, lintCard, isJunkPath, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
 import { snapshot, statTree, getReadOnlyDiff } from "./snapshot.mjs";
 import { runCommit, runRecheck } from "./commit.mjs";
 import { runExecutor } from "./executor.mjs";
-import { runReview } from "./review.mjs";
+import { runReview, runReviewOnly } from "./review.mjs";
 import { formatLedgerLines, appendAcceptanceDraft } from "./acceptance.mjs";
 
 // 1. Args & Card Parsing
@@ -26,6 +26,7 @@ const MAX_BASE_BYTES = 1024 * 1024;
 
 if (args.commit) runCommit(args, { stateDir });
 if (args.recheck) await runRecheck(args, { stateDir });
+if (args["review-only"]) await runReviewOnly(args, { stateDir, liveDir });
 
 const isFix = args.fix !== undefined;
 const recon = !isFix && args.recon === true;
@@ -162,9 +163,9 @@ const cardText = cardBytes.toString("utf8");
 const cardSha = crypto.createHash("sha256").update(cardBytes).digest("hex");
 
 if (isFix) {
-  const hasFixHeading = cardText.split(/\r?\n/).some((l) => l.trim() === `## Fix ${fixRoundN}`);
+  const hasFixHeading = cardText.split(/\r?\n/).some((l) => new RegExp(`^## Fix ${fixRoundN}(\\s|$)`).test(l.trim()));
   if (!hasFixHeading) {
-    console.error(`The card has no line exactly '## Fix ${fixRoundN}'`);
+    console.error(`The card has no heading '## Fix ${fixRoundN}'`);
     process.exit(2);
   }
 } else if (!args.commit) {
@@ -214,7 +215,8 @@ let taskDir = path.posix.relative(repoAbs, cardDirNorm);
 if (taskDir === "") taskDir = ".";
 const exemptPaths = new Set([
   taskDir === "." ? "card.md" : `${taskDir}/card.md`,
-  taskDir === "." ? "review.md" : `${taskDir}/review.md`
+  taskDir === "." ? "review.md" : `${taskDir}/review.md`,
+  taskDir === "." ? "reply.md" : `${taskDir}/reply.md`
 ]);
 
 const readOnlyRaw = [];
@@ -274,6 +276,7 @@ if (isFix) {
   state.outcome = null;
   state.readOnlyChanged = null;
   state.outOfScope = null;
+  state.concurrent = [];
   state.junk = null;
   delete state.baselineCheck;
   state.exec = { exit: null, status: null, seconds: null, reply: null };
@@ -350,6 +353,7 @@ if (isFix) {
     cardSha,
     executor,
     risk,
+    reviewer: args.reviewer,
     repo: repoAbs,
     git: isGit,
     check,
@@ -380,12 +384,13 @@ if (isFix) {
 // 3. Snapshot
 state.before = snapshot(repoAbs, isGit);
 state.readOnlyBefore = statTree(readOnlyPaths, { normLiveDir, cardDirNorm });
+state.readOnlyPaths = readOnlyPaths;
 save(state);
 
 if (!isFix && !recon && check) {
   const baseRes = await runBash(`{\n${check}\n} > ${q(baselineLog)} 2>&1`, { cwd: repoAbs, timeoutMin: Math.min(30, remainingMin()), exitPath: null });
-  const roDiff = getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths, { repoAbs, normLiveDir, cardDirNorm });
-  if (roDiff) {
+  const roDiff = filterReadOnly(getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths, { repoAbs, normLiveDir, cardDirNorm }), stateDir, state);
+  if (roDiff.length) {
     state.outcome = "readonly_violated";
     state.readOnlyChanged = roDiff;
   }
@@ -393,7 +398,7 @@ if (!isFix && !recon && check) {
   const allBasePaths = new Set([...Object.keys(state.before), ...Object.keys(afterBase)]);
   const baseTouched = [];
   for (const p of allBasePaths) {
-    if (exemptPaths.has(p)) continue;
+    if (exemptPaths.has(p) || exemptTaskPath.test(p)) continue;
     const b = state.before[p];
     const a = afterBase[p];
     if (!b || !a) {
@@ -490,6 +495,18 @@ if (!state.outcome) {
     normLiveDir,
     cardDirNorm
   });
+  if (state.exec.reply !== null && state.exec.reply !== undefined) {
+    if (process.env.ORCH_RUNNER_FAKE_EXEC) {
+      const stream = path.posix.join(liveDir, `agy-${name}.jsonl`);
+      if (fs.existsSync(stream)) state.exec.reply = fs.readFileSync(stream, "utf8").trimEnd();
+    }
+    fs.writeFileSync(path.join(cardDirNorm, "reply.md"), state.exec.reply, "utf8");
+  }
+  if (state.outcome === "readonly_violated") {
+    state.readOnlyChanged = filterReadOnly(state.readOnlyChanged, stateDir, state);
+    if (!state.readOnlyChanged.length) state.outcome = null;
+  }
+  save(state);
 }
 
 function scopeCheck() {
@@ -497,7 +514,7 @@ function scopeCheck() {
   const allPaths = new Set([...Object.keys(state.before), ...Object.keys(state.after)]);
   const touched = [];
   for (const p of allPaths) {
-    if (exemptPaths.has(p)) continue;
+    if (exemptPaths.has(p) || exemptTaskPath.test(p)) continue;
     const b = state.before[p];
     const a = state.after[p];
     if (!b || !a) {
@@ -509,13 +526,7 @@ function scopeCheck() {
   touched.sort();
   state.touched = touched;
 
-  const outOfScope = [];
-  for (const p of touched) {
-    const allowed = !recon && mayChange.some((entry) => entry.endsWith("/") ? p.startsWith(entry) : p === entry);
-    if (!allowed) {
-      outOfScope.push(p);
-    }
-  }
+  const outOfScope = outOfScopePaths(touched, stateDir, state);
   state.outOfScope = outOfScope;
 
   const junk = outOfScope.filter(isJunkPath);
@@ -591,8 +602,8 @@ if (!state.outcome) {
 
     // Runs whatever the Check's outcome: a failing Check may still have written to read-only data.
     if (state.readOnlyBefore) {
-      const roDiff = getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths, { repoAbs, normLiveDir, cardDirNorm });
-      if (roDiff) {
+      const roDiff = filterReadOnly(getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths, { repoAbs, normLiveDir, cardDirNorm }), stateDir, state);
+      if (roDiff.length) {
         state.outcome = "readonly_violated";
         state.readOnlyChanged = roDiff;
         save(state);
@@ -742,6 +753,7 @@ const outOfScopeStr = nonJunkOutOfScope.length > 0 ? nonJunkOutOfScope.join(", "
 const junkStr = (state.junk && state.junk.length > 0) ? `   junk: ${state.junk.join(", ")}` : "";
 const cardModStr = state.cardModified ? "yes" : "no";
 lines.push(`touched: ${touchedStr}   out of scope: ${outOfScopeStr}${junkStr}   card modified: ${cardModStr}`);
+if (state.concurrent?.length) lines.push(`concurrent: ${state.concurrent.map((c) => `${c.path} (${c.name})`).join(", ")}`);
 if (state.readOnlyChanged && state.readOnlyChanged.length > 0) {
   lines.push(`read-only changed: ${state.readOnlyChanged.join(", ")}`);
 }
@@ -823,6 +835,7 @@ lines.push(`tokens:`);
 lines.push(formatLedgerLines(state.ledger));
 
 lines.push(`reply:`);
+if (state.exec?.reply !== null && state.exec?.reply !== undefined) lines.push(`full reply: ${path.join(cardDirNorm, "reply.md")}`);
 const replyLines = (state.exec?.reply ?? "").split(/\r?\n/);
 const replyTail = replyLines.slice(-(recon ? 40 : 15)).join("\n");
 lines.push(replyTail);

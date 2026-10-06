@@ -1,7 +1,54 @@
 import path from "node:path";
+import fs from "node:fs";
+
+export const exemptTaskPath = /^docs\/orch\/[^/]+\/(card|review|reply)\.md$/;
+
+export function concurrentClaims(stateDir, self) {
+  const claims = [];
+  for (const file of fs.readdirSync(stateDir)) {
+    if (!file.endsWith(".json") || file === `${self.name}.json`) continue;
+    try {
+      const abs = path.join(stateDir, file);
+      const other = JSON.parse(fs.readFileSync(abs, "utf8"));
+      if (self.repo && other.repo !== self.repo) continue;
+      if (other.outcome && fs.statSync(abs).mtimeMs <= Date.parse(self.startedAt)) continue;
+      claims.push({ name: other.name ?? file.slice(0, -5), mayChange: (other.mayChange || []).map((p) => self.repo ? p : path.resolve(other.repo, p).replaceAll("\\", "/") + (p.endsWith("/") ? "/" : "")) });
+    } catch {}
+  }
+  return claims;
+}
+
+export function claimedPath(p, entries) {
+  return entries.some((entry) => entry.endsWith("/") ? p.startsWith(entry) : p === entry);
+}
+
+export function outOfScopePaths(paths, stateDir, state) {
+  const claims = concurrentClaims(stateDir, state);
+  return paths.filter((p) => {
+    if (!state.recon && claimedPath(p, state.mayChange || [])) return false;
+    const claim = claims.find((c) => claimedPath(p, c.mayChange));
+    if (!claim) return true;
+    state.concurrent ??= [];
+    if (!state.concurrent.some((c) => c.path === p && c.name === claim.name)) state.concurrent.push({ path: p, name: claim.name });
+    return false;
+  });
+}
+
+export function filterReadOnly(paths, stateDir, state) {
+  const claims = concurrentClaims(stateDir, { ...state, repo: null });
+  return (paths || []).filter((p) => {
+    const abs = path.resolve(state.repo, p).replaceAll("\\", "/");
+    if (exemptTaskPath.test(path.posix.relative(state.repo, abs))) return false;
+    const claim = claims.find((c) => claimedPath(abs, c.mayChange));
+    if (!claim) return true;
+    state.concurrent ??= [];
+    if (!state.concurrent.some((c) => c.path === p && c.name === claim.name)) state.concurrent.push({ path: p, name: claim.name });
+    return false;
+  });
+}
 
 export function parseArgs(args) {
-  const booleanFlags = new Set(["recon", "commit", "fresh", "recheck"]);
+  const booleanFlags = new Set(["recon", "commit", "fresh", "recheck", "review-only"]);
   const parsed = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -31,7 +78,7 @@ export function getSection(text, title) {
     if (/^##\s+/.test(line)) {
       if (inSection) break;
       const secTitle = line.replace(/^##\s+/, "").trim().split(/\s+/)[0];
-      if (secTitle.toLowerCase() === title.toLowerCase()) {
+      if (title.startsWith("Fix ") ? new RegExp(`^## ${title}(\\s|$)`).test(line.trim()) : secTitle.toLowerCase() === title.toLowerCase()) {
         inSection = true;
         continue;
       }

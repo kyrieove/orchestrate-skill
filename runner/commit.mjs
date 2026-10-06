@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { getSection } from "./card.mjs";
+import { getSection, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
 import { q, runBash } from "./lib.mjs";
-import { snapshot } from "./snapshot.mjs";
+import { snapshot, getReadOnlyDiff } from "./snapshot.mjs";
 
 export function runCommit(args, ctx) {
   const { stateDir } = ctx;
@@ -60,13 +60,17 @@ export function runCommit(args, ctx) {
   const verdict = verdictMatch ? verdictMatch[1].toLowerCase() : "missing";
   const hasClaudeFix = /^-\s*claude fix:\s*\S/im.test(acceptanceSection);
   const outcome = state.outcome ?? "none";
+  const overrideLine = acceptanceSection.match(/^- scope override: .+/m)?.[0];
+  const scopeOverride = overrideLine && state.recheck?.scopeOverride === overrideLine && state.recheck.exit === 0 &&
+    (state.reviewOnly?.verdict === "PASS" || outcome === "review_pass") && Date.parse(state.reviewOnly?.at) >= Date.parse(state.recheck.at);
 
   const passOutcomes = new Set(["review_pass", "passed_no_review", "fix_passed", "recon_done"]);
   const fixableOutcomes = new Set(["review_fail", "check_failed"]);
 
   let allowed = false;
   if (verdict === "accepted") {
-    allowed = passOutcomes.has(outcome) || (fixableOutcomes.has(outcome) && hasClaudeFix);
+    allowed = (passOutcomes.has(outcome) && (!(outcome === "review_pass" && state.outOfScope?.length) || scopeOverride)) ||
+      (fixableOutcomes.has(outcome) && hasClaudeFix) || (outcome === "out_of_scope" && scopeOverride);
   } else if (verdict === "review pending") {
     allowed = outcome === "review_pending";
   }
@@ -120,12 +124,14 @@ export function runCommit(args, ctx) {
   if (taskDir === "") taskDir = ".";
   const cardRel = taskDir === "." ? "card.md" : `${taskDir}/card.md`;
   const reviewRel = taskDir === "." ? "review.md" : `${taskDir}/review.md`;
+  const replyRel = taskDir === "." ? "reply.md" : `${taskDir}/reply.md`;
 
   const filesToStage = new Set(stagedTouched);
   filesToStage.add(cardRel);
   if (fs.existsSync(path.resolve(repoAbs, reviewRel))) {
     filesToStage.add(reviewRel);
   }
+  if (fs.existsSync(path.resolve(repoAbs, replyRel))) filesToStage.add(replyRel);
 
   const reviewLogRel = "docs/review-log.md";
   const reviewLogAbs = path.resolve(repoAbs, reviewLogRel);
@@ -197,6 +203,23 @@ export async function runRecheck(args, { stateDir }) {
   const exit = checkRes.timedOut ? null : checkRes.exit;
   state.checkResult = { exit, log: checkLog };
   state.recheck = { exit, at: new Date().toISOString() };
+  const acceptance = getSection(fs.readFileSync(state.card, "utf8"), "Acceptance") || "";
+  state.recheck.scopeOverride = acceptance.match(/^- scope override: .+/m)?.[0];
+
+  const fresh = snapshot(state.repo, true);
+  const taskDir = path.posix.relative(state.repo, path.dirname(state.card).replaceAll("\\", "/"));
+  const taskDocs = new Set(["card.md", "review.md", "reply.md"].map((p) => taskDir ? `${taskDir}/${p}` : p));
+  const touched = [...new Set([...Object.keys(state.before || {}), ...Object.keys(fresh)])].filter((p) =>
+    !exemptTaskPath.test(p) && !taskDocs.has(p) &&
+    JSON.stringify(state.before?.[p] ?? null) !== JSON.stringify(fresh[p] ?? null));
+  state.outOfScope = outOfScopePaths(touched, stateDir, state);
+  if (state.outOfScope.length) state.outcome = "out_of_scope";
+  if (state.readOnlyBefore) {
+    const cardDirNorm = path.dirname(state.card).replaceAll("\\", "/");
+    state.readOnlyChanged = filterReadOnly(getReadOnlyDiff(state.readOnlyBefore, state.readOnlyPaths || Object.keys(state.readOnlyBefore),
+      { repoAbs: state.repo, normLiveDir: path.dirname(stateDir).replaceAll("\\", "/"), cardDirNorm }), stateDir, state);
+    if (state.readOnlyChanged.length) state.outcome = "readonly_violated";
+  }
 
   if (!checkRes.timedOut) {
     const paths = Array.from(new Set([...(state.allTouched || []), ...(state.touched || [])])).sort();
@@ -218,6 +241,7 @@ export async function runRecheck(args, { stateDir }) {
   }
 
   console.log(`recheck: exit=${exit}`);
+  if (state.concurrent?.length) console.log(`concurrent: ${state.concurrent.map((c) => `${c.path} (${c.name})`).join(", ")}`);
   if (exit !== 0 && fs.existsSync(checkLog)) {
     const logLines = fs.readFileSync(checkLog, "utf8").split(/\r?\n/).filter(Boolean);
     const tail20 = logLines.slice(-20).join("\n");

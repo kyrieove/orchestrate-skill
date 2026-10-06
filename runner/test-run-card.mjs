@@ -497,7 +497,7 @@ No rm, no git push
     const showRes = spawnSync("git", ["-C", tempRepo, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
     assert.strictEqual(showRes.status, 0);
     const committedFiles = showRes.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
-    assert.deepStrictEqual(committedFiles, ["a.txt", "b.txt", "c.txt", "docs/orch/t/card.md"]);
+    assert.deepStrictEqual(committedFiles, ["a.txt", "b.txt", "c.txt", "docs/orch/t/card.md", "docs/orch/t/reply.md"]);
     passedCount++;
   }
 
@@ -1641,11 +1641,102 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 35) {
-    console.log("35/35 passed");
+  // Task documents from other writers are exempt, including under a read-only directory.
+  {
+    resetRepo();
+    writeCard();
+    fs.writeFileSync(cardPath, fs.readFileSync(cardPath, "utf8").replace("read-only: `data/`", "read-only: `data/`, `docs/orch/`"), "utf8");
+    const res = runCard("case-scope-docs", { env: { ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "mkdir -p docs/orch/other; echo other > docs/orch/other/card.md; echo review > docs/orch/other/review.md; echo reply > docs/orch/other/reply.md; echo 'STATUS: done'" } });
+    assert.strictEqual(res.status, 0, res.stderr);
+    const state = readState("case-scope-docs");
+    assert.strictEqual(state.outcome, "passed_no_review");
+    assert.deepStrictEqual(state.touched, []);
+    passedCount++;
+  }
+
+  // A concurrent run claims an otherwise out-of-scope file and a read-only file.
+  {
+    resetRepo();
+    writeCard();
+    const claimFile = path.join(tempLive, "orch-runner", "scope-other.json");
+    fs.writeFileSync(claimFile, JSON.stringify({ name: "scope-other", repo: tempRepo, mayChange: ["c.txt", "data/"] }), "utf8");
+    const res = runCard("case-scope-concurrent", { env: { ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo c > c.txt; echo changed > data/f.txt; echo 'STATUS: done'" } });
+    assert.strictEqual(res.status, 0, res.stderr);
+    const state = readState("case-scope-concurrent");
+    assert.strictEqual(state.outcome, "passed_no_review");
+    assert.deepStrictEqual(state.outOfScope, []);
+    assert.ok(state.concurrent.some((c) => c.path === "c.txt" && c.name === "scope-other"));
+    assert.ok(state.concurrent.some((c) => c.path === "data/f.txt" && c.name === "scope-other"));
+    assert.ok(res.stdout.includes("concurrent:"));
+    assert.strictEqual(runCard("case-scope-concurrent", { args: ["--recheck"] }).status, 0);
+    assert.deepStrictEqual(readState("case-scope-concurrent").outOfScope, []);
+    fs.writeFileSync(claimFile, JSON.stringify({ name: "scope-other", repo: tempRepo, outcome: "done", mayChange: [] }), "utf8");
+    passedCount++;
+  }
+
+  // Fix headings allow trailing text, and their section can be extracted.
+  {
+    resetRepo();
+    writeCard();
+    const env = { ...baseEnv, ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'" };
+    assert.strictEqual(runCard("case-scope-fix", { env }).status, 0);
+    fs.appendFileSync(cardPath, "\n## Fix 1 (N = 2)\n1. Fix step.\n", "utf8");
+    const { getSection } = await import("./card.mjs");
+    assert.strictEqual(getSection(fs.readFileSync(cardPath, "utf8"), "Fix 1"), "1. Fix step.\n");
+    const res = runCard("case-scope-fix", { env, args: ["--fix", "1"] });
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.strictEqual(readState("case-scope-fix").outcome, "fix_passed");
+    passedCount++;
+  }
+
+  // The full reply survives the executor's fallback tail and the summary links to it.
+  {
+    resetRepo();
+    writeCard();
+    const res = runCard("case-scope-reply", { env: { ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 'STATUS: done'; for i in $(seq 1 60); do echo reply-$i; done" } });
+    assert.strictEqual(res.status, 0, res.stderr);
+    const reply = fs.readFileSync(path.join(cardDir, "reply.md"), "utf8");
+    assert.ok(reply.startsWith("STATUS: done\nreply-1\n"));
+    assert.ok(reply.endsWith("reply-60"));
+    assert.strictEqual(reply, readState("case-scope-reply").exec.reply);
+    assert.ok(res.stdout.includes("full reply:"));
+    passedCount++;
+  }
+
+  // Saved-state review and an explicit scope override permit acceptance after recheck.
+  {
+    resetRepo();
+    writeCard(undefined, "medium");
+    const env = { ...baseEnv, ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo c > c.txt; echo 'STATUS: done'; echo scope-review-reply",
+      ORCH_RUNNER_FAKE_REVIEW: "echo 'VERDICT: PASS' > docs/orch/t/review.md" };
+    assert.strictEqual(runCard("case-scope-review", { env, risk: "medium", args: ["--reviewer", "sol"] }).status, 0);
+    assert.strictEqual(readState("case-scope-review").outcome, "out_of_scope");
+    fs.appendFileSync(cardPath, "\n## Acceptance\n- verdict: accepted\n- scope override: c.txt was written by another task\n", "utf8");
+    assert.strictEqual(runCard("case-scope-review", { args: ["--commit", "--message", "scope test"] }).status, 2);
+    assert.strictEqual(runCard("case-scope-review", { args: ["--recheck"] }).status, 0);
+    const res = spawnSync(process.execPath, [runCardScript, "--review-only", "--name", "case-scope-review"], { env, encoding: "utf8" });
+    assert.strictEqual(res.status, 0, res.stderr);
+    const state = readState("case-scope-review");
+    assert.strictEqual(state.outcome, "review_pass");
+    assert.strictEqual(state.reviewOnly.verdict, "PASS");
+    assert.strictEqual(state.review.model, "gpt-6.1-sol");
+    assert.strictEqual(res.stdout.trim().split(/\r?\n/).length, 3);
+    assert.strictEqual(fs.readFileSync(path.join(cardDir, "reply.md"), "utf8"), "STATUS: done\nscope-review-reply");
+    const commit = runCard("case-scope-review", { args: ["--commit", "--message", "scope test"] });
+    assert.strictEqual(commit.status, 0, commit.stderr);
+    const staged = spawnSync("git", ["show", "--name-only", "--format=", "HEAD"], { cwd: tempRepo, encoding: "utf8" }).stdout;
+    assert.ok(staged.includes("docs/orch/t/reply.md"));
+    passedCount++;
+  }
+
+  if (passedCount === 40) {
+    console.log("40/40 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/35 passed`);
+    console.error(`Only ${passedCount}/40 passed`);
     process.exitCode = 1;
   }
 } finally {

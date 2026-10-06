@@ -122,7 +122,7 @@ conformance review catches a wrong number; only an independent recompute does.
    | `review_pass`, `passed_no_review`, `recon_done`, `fix_passed` | step 6 (low risk: also glance at `diff --stat`) |
    | `review_fail` | check each finding at its `file:line`, then step 5 |
    | `check_failed` | the summary has the Check's tail; step 5 |
-   | `out_of_scope` | 🛑 show the files, the user decides (never auto-revert); `junk:` paths are deleted only after the user says so in one line |
+   | `out_of_scope` | 🛑 show the files, the user decides (never auto-revert); `junk:` paths are deleted only after the user says so in one line; false positive → add `- scope override: <reason>`, run `--recheck` and `--review-only`, then `--commit` |
    | `readonly_violated` | 🛑 show the changed read-only paths to the user |
    | `blocked`, `failed`, `interrupted` | read the reply / stream tail; executor failures follow **Executor fails** above |
    | `review_pending` | codex quota ran out: **Reviewer out of quota** above |
@@ -143,7 +143,7 @@ conformance review catches a wrong number; only an independent recompute does.
    pending / rejected; `review findings: N real / M false positive / K missed`, with tier and reviewer; recompute result
    for high risk); the files, Check and `tokens:` lines are already filled in. Then
    `node ~/.claude/skills/orchestrate/runner/run-card.mjs --commit --name <name> --message "<msg>"` — it stages only the
-   card's files + card.md + review.md (and appends to `docs/review-log.md` when the project has one), commits, prints the
+   card's files + card.md + review.md + reply.md (and appends to `docs/review-log.md` when the project has one), commits, prints the
    hash; **don't push**. Commit messages end with the attribution lines the session asks for.
    When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
    with where it was found and the fix commit, then commit the card. After 10–15 cards, change the Modes table from
@@ -175,7 +175,7 @@ conformance review catches a wrong number; only an independent recompute does.
 ```
 
 Later sections appended in the same file: `## Fix 1`, `## Fix 2`, `## Acceptance`. Each task folder
-holds only `card.md` and `review.md`. The runner refuses a card missing Goal / Risk / Files / Check / Steps (N = k) /
+holds only `card.md`, `review.md` and `reply.md` (the executor's full reply). The runner refuses a card missing Goal / Risk / Files / Check / Steps (N = k) /
 Don't or the three quoted Don't sentences (recon cards may omit Check).
 
 ### Research data outside git (input read-only, output isolated)

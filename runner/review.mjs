@@ -2,6 +2,33 @@ import fs from "node:fs";
 import path from "node:path";
 import { q, runBash, quotaOf } from "./lib.mjs";
 
+export async function runReviewOnly(args, { stateDir, liveDir }) {
+  if (typeof args.name !== "string" || !/^[\w.-]+$/.test(args.name)) {
+    console.error("Argument --name required (letters, digits, _ . - only)");
+    process.exit(2);
+  }
+  const stateFile = path.join(stateDir, `${args.name}.json`);
+  if (!fs.existsSync(stateFile)) {
+    console.error("No state file found:", stateFile);
+    process.exit(2);
+  }
+  const state = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+  const outcome = state.outcome;
+  const save = (st) => {
+    fs.writeFileSync(`${stateFile}.tmp`, JSON.stringify(st, null, 2), "utf8");
+    fs.renameSync(`${stateFile}.tmp`, stateFile);
+  };
+  const taskDir = path.relative(state.repo, path.dirname(state.card)).replaceAll("\\", "/");
+  await runReview({ args: { ...args, reviewer: state.reviewer ?? (state.review?.model === "gpt-6.1-sol" ? "sol" : undefined) }, executor: state.executor, risk: state.risk, state, save,
+    isGit: state.git !== false, cardAbs: state.card, liveDir, name: state.name, repoAbs: state.repo, taskDir, remainingMin: () => 30 });
+  state.reviewOnly = { verdict: state.review.verdict, at: new Date().toISOString() };
+  if (!["out_of_scope", "review_error", "review_pending"].includes(outcome) || !["PASS", "FAIL"].includes(state.review.verdict)) state.outcome = outcome;
+  state.stage = "done";
+  save(state);
+  console.log(`ORCH-RUNNER ${state.name} outcome=${state.outcome} risk=${state.risk}\nreview: ${state.review.model} ${state.review.verdict}\nreview file: ${path.join(path.dirname(state.card), "review.md")}`);
+  process.exit(state.review.verdict === "PASS" ? 0 : 1);
+}
+
 export async function runReview(ctx) {
   const {
     args,
