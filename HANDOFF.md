@@ -14,6 +14,8 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
   5. 高风险卡派发前 sol 只读计划审查：`PLAN: REVISE` → `plan_revise`，执行者不启动。
 - 进度行规则：Y 30–50 字，只要看得出做到哪一步。
 - 已知：sol 打回（review_fail）的卡不会自动生成 Acceptance 草稿，需手写。
+- 下一步（可选）：① 让 review_fail 也生成 Acceptance 草稿；② 派第一张高风险卡，实地看计划审查（plan_revise）；③ 调研报告的事实错误还没改回报告（两轮审查结论见 docs/orch/2026-10-06-review-research、research-audit-sol 的 card.md）。
+- 关键文件：runner/run-card.mjs（主流程）、runner/commit.mjs（--commit 门槛 + --recheck）、runner/review.mjs、runner/lib.mjs（agy-fallback、quotaOf）、ledger.mjs；token-weather 的进度条在 D:/2/dev/token-weather-quotas/hooks/token-weather.mjs。
 
 ## 2026-10-05 晚
 
