@@ -247,6 +247,7 @@ for (const p of readOnlyRaw) {
 
 const stateFile = path.posix.join(stateDir, `${name}.json`);
 const checkLog = path.posix.join(stateDir, `${name}.check.log`);
+const baselineLog = path.posix.join(stateDir, `${name}.baseline.log`);
 
 function save(st) {
   const tmp = `${stateFile}.tmp`;
@@ -273,6 +274,7 @@ if (isFix) {
   state.readOnlyChanged = null;
   state.outOfScope = null;
   state.junk = null;
+  delete state.baselineCheck;
   state.exec = { exit: null, status: null, seconds: null, reply: null };
   state.checkResult = { exit: null, log: null };
   save(state);
@@ -379,6 +381,37 @@ state.before = snapshot(repoAbs, isGit);
 state.readOnlyBefore = statTree(readOnlyPaths, { normLiveDir, cardDirNorm });
 save(state);
 
+if (!isFix && !recon && check) {
+  const baseRes = await runBash(`{\n${check}\n} > ${q(baselineLog)} 2>&1`, { cwd: repoAbs, timeoutMin: Math.min(30, remainingMin()), exitPath: null });
+  const roDiff = getReadOnlyDiff(state.readOnlyBefore, readOnlyPaths, { repoAbs, normLiveDir, cardDirNorm });
+  if (roDiff) {
+    state.outcome = "readonly_violated";
+    state.readOnlyChanged = roDiff;
+  }
+  const afterBase = snapshot(repoAbs, isGit);
+  const allBasePaths = new Set([...Object.keys(state.before), ...Object.keys(afterBase)]);
+  const baseTouched = [];
+  for (const p of allBasePaths) {
+    if (exemptPaths.has(p)) continue;
+    const b = state.before[p];
+    const a = afterBase[p];
+    if (!b || !a) {
+      baseTouched.push(p);
+    } else if (b.st !== a.st || b.hash !== a.hash) {
+      baseTouched.push(p);
+    }
+  }
+  baseTouched.sort();
+  // `before` is not retaken: a Check that writes outside ## Files must still show up as out of scope (Case T).
+  state.baselineCheck = {
+    exit: baseRes.exit,
+    timedOut: Boolean(baseRes.timedOut),
+    log: baselineLog,
+    touched: baseTouched
+  };
+  save(state);
+}
+
 if (isFix) {
   const execPrefix = (executor === "agy" || process.env.ORCH_RUNNER_FAKE_EXEC) ? "agy" : "codex";
   fs.rmSync(path.posix.join(liveDir, `${execPrefix}-${name}.progress`), { force: true });
@@ -392,24 +425,26 @@ if (isFix) {
 }
 
 // 4. Executor
-await runExecutor({
-  executor,
-  liveDir,
-  name,
-  isFix,
-  cardAbs,
-  fixRoundN,
-  recon,
-  state,
-  args,
-  isGit,
-  repoAbs,
-  remainingMin,
-  save,
-  readOnlyPaths,
-  normLiveDir,
-  cardDirNorm
-});
+if (!state.outcome) {
+  await runExecutor({
+    executor,
+    liveDir,
+    name,
+    isFix,
+    cardAbs,
+    fixRoundN,
+    recon,
+    state,
+    args,
+    isGit,
+    repoAbs,
+    remainingMin,
+    save,
+    readOnlyPaths,
+    normLiveDir,
+    cardDirNorm
+  });
+}
 
 function scopeCheck() {
   state.after = snapshot(repoAbs, isGit);
@@ -643,6 +678,19 @@ if (state.readOnlyChanged && state.readOnlyChanged.length > 0) {
 
 const checkExit = state.checkResult?.exit !== null && state.checkResult?.exit !== undefined ? state.checkResult.exit : "skipped";
 lines.push(`check: exit=${checkExit} \`${check}\``);
+if (state.baselineCheck) {
+  const bExit = state.baselineCheck.exit;
+  const bTimedOut = state.baselineCheck.timedOut;
+  const bTouched = state.baselineCheck.touched || [];
+  let bLine = bTimedOut ? "baseline check: timed out" : `baseline check: exit=${bExit}`;
+  if (!bTimedOut && bExit !== 0 && checkExit !== 0 && checkExit !== "skipped") {
+    bLine += " (Check was already red before the executor)";
+  }
+  if (bTouched.length > 0) {
+    bLine += `   baseline wrote: ${bTouched.join(", ")}`;
+  }
+  lines.push(bLine);
+}
 if (checkExit !== "skipped" && checkExit !== 0 && fs.existsSync(checkLog)) {
   const logLines = fs.readFileSync(checkLog, "utf8").split(/\r?\n/).filter(Boolean);
   const tail20 = logLines.slice(-20).join("\n");

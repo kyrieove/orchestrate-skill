@@ -1259,11 +1259,137 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 32) {
-    console.log("32/32 passed");
+  // Case BL: baseline-check
+  // (a) Check test -f made.txt, fake exec creates made.txt (listed in ## Files), risk low → passed_no_review,
+  // baselineCheck.exit !== 0, summary stdout has baseline check: exit=1 and NOT already red.
+  // (b) Check exit 3, risk low → check_failed, stdout has (Check was already red before the executor).
+  // (c) Check that writes into a read-only path (echo x >> data/r.txt) → readonly_violated, marker file does not exist.
+  // (d) Check echo x > .cache-baseline && true with fake exec touching only an allowed file → .cache-baseline is in
+  // state.baselineCheck.touched and still in state.outOfScope (before is not retaken).
+  // (e) --recon and a --fix 1 round → state.baselineCheck is undefined.
+  {
+    // (a)
+    resetRepo();
+    const cardBLa = `# test-task — test card
+
+## Goal
+Test baseline check passed.
+
+## Risk
+low
+
+## Files
+may change: \`made.txt\` / read-only: \`data/\`
+
+## Steps (N = 1)
+1. Step 1.
+
+## Check
+\`test -f made.txt\`
+
+## Don't
+Run scripts in the foreground and wait
+Reuse existing functions
+No rm, no git push
+`;
+    fs.writeFileSync(cardPath, cardBLa, "utf8");
+    const envBLa = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo ok > made.txt; echo 'STATUS: done'"
+    };
+    delete envBLa.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resBLa = runCard("case-bl-a", { env: envBLa });
+    assert.strictEqual(resBLa.status, 0, `Case BL(a) exit status was ${resBLa.status}: ${resBLa.stderr}`);
+    const stateBLa = readState("case-bl-a");
+    assert.strictEqual(stateBLa.outcome, "passed_no_review");
+    assert.ok(stateBLa.baselineCheck && stateBLa.baselineCheck.exit !== 0, "baselineCheck.exit should be !== 0");
+    assert.ok(resBLa.stdout.includes("baseline check: exit=1"), `stdout should contain 'baseline check: exit=1', got: ${resBLa.stdout}`);
+    assert.ok(!resBLa.stdout.includes("already red"), `stdout should NOT contain 'already red', got: ${resBLa.stdout}`);
+
+    // (b)
+    resetRepo();
+    writeCard("exit 3", "low");
+    const envBLb = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'"
+    };
+    delete envBLb.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resBLb = runCard("case-bl-b", { env: envBLb });
+    assert.strictEqual(resBLb.status, 0, `Case BL(b) exit status was ${resBLb.status}: ${resBLb.stderr}`);
+    const stateBLb = readState("case-bl-b");
+    assert.strictEqual(stateBLb.outcome, "check_failed");
+    assert.ok(resBLb.stdout.includes("(Check was already red before the executor)"), `stdout should contain '(Check was already red before the executor)', got: ${resBLb.stdout}`);
+
+    // (c)
+    resetRepo();
+    writeCard("echo x >> data/r.txt", "low");
+    const markerC = path.join(tempRepo, "exec-ran.txt").replaceAll("\\", "/");
+    fs.rmSync(markerC, { force: true });
+    const envBLc = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: `node -e "require('fs').writeFileSync('${markerC}','')"; echo 'STATUS: done'`
+    };
+    delete envBLc.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resBLc = runCard("case-bl-c", { env: envBLc });
+    assert.strictEqual(resBLc.status, 0, `Case BL(c) exit status was ${resBLc.status}: ${resBLc.stderr}`);
+    const stateBLc = readState("case-bl-c");
+    assert.strictEqual(stateBLc.outcome, "readonly_violated");
+    assert.strictEqual(fs.existsSync(markerC), false, "exec marker file must not exist");
+
+    // (d)
+    resetRepo();
+    writeCard("echo x > .cache-baseline && true", "low");
+    const envBLd = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'"
+    };
+    delete envBLd.ORCH_RUNNER_FAKE_REVIEW;
+
+    const resBLd = runCard("case-bl-d", { env: envBLd });
+    assert.strictEqual(resBLd.status, 0, `Case BL(d) exit status was ${resBLd.status}: ${resBLd.stderr}`);
+    const stateBLd = readState("case-bl-d");
+    assert.ok(stateBLd.baselineCheck?.touched?.includes(".cache-baseline"), `baselineCheck.touched should include .cache-baseline, got: ${stateBLd.baselineCheck?.touched}`);
+    assert.ok(stateBLd.outOfScope?.includes(".cache-baseline"), `a Check writing outside ## Files stays out of scope, got: ${stateBLd.outOfScope}`);
+
+    // (e) --recon and a --fix 1 round
+    resetRepo();
+    writeCard();
+    const envBLeRecon = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 'STATUS: done'; echo 'answer: 42'"
+    };
+    delete envBLeRecon.ORCH_RUNNER_FAKE_REVIEW;
+    const resBLeRecon = runCard("case-bl-e", { env: envBLeRecon, args: ["--recon"] });
+    assert.strictEqual(resBLeRecon.status, 0, `Case BL(e) recon status was ${resBLeRecon.status}: ${resBLeRecon.stderr}`);
+    const stateBLeRecon = readState("case-bl-e");
+    assert.strictEqual(stateBLeRecon.outcome, "recon_done");
+    assert.strictEqual(stateBLeRecon.baselineCheck, undefined, "state.baselineCheck must be undefined for --recon");
+
+    resetRepo();
+    writeCard();
+    fs.appendFileSync(cardPath, "\n## Fix 1\n1. Fix step.\n", "utf8");
+    const envBLeFix = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 4 > a.txt; echo 'STATUS: done'"
+    };
+    delete envBLeFix.ORCH_RUNNER_FAKE_REVIEW;
+    const resBLeFix = runCard("case-a", { args: ["--fix", "1"], env: envBLeFix });
+    assert.strictEqual(resBLeFix.status, 0, `Case BL(e) fix status was ${resBLeFix.status}: ${resBLeFix.stderr}`);
+    const stateBLeFix = readState("case-a");
+    assert.strictEqual(stateBLeFix.outcome, "fix_passed");
+    assert.strictEqual(stateBLeFix.baselineCheck, undefined, "state.baselineCheck must be undefined for --fix");
+
+    passedCount++;
+  }
+
+  if (passedCount === 33) {
+    console.log("33/33 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/32 passed`);
+    console.error(`Only ${passedCount}/33 passed`);
     process.exitCode = 1;
   }
 } finally {
