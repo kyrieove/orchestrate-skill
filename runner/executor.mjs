@@ -24,7 +24,7 @@ export async function runExecutor(ctx) {
   } = ctx;
 
   const progressPrefix = (executor === "agy" || process.env.ORCH_RUNNER_FAKE_EXEC) ? "agy" : "codex";
-  const progressLine = `after starting, append \`0/N 已完成：无 · 正在：<第1步>\`, and after finishing each step append \`k/N 已完成：X · 正在：Y\` (Chinese; Y names the file / function and the action, 15–30 characters, e.g. \`2/5 已完成：读 README · 正在：在 README 的 Demo 前插入 Quota row 一节\`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to ${liveDir}/${progressPrefix}-${name}.progress. Just append; do not open, list or inspect that directory or any other file to learn the format.`;
+  const progressLine = `after starting, append \`0/N 已完成：无 · 正在：<第1步>\`, and after finishing each step append \`k/N 已完成：X · 正在：Y\` (Chinese; Y says in plain words what is being done now and how far along it is, 30–50 characters, no function names needed, e.g. \`2/5 已完成：读 README · 正在：给 README 加额度说明，开头两段已写好，还差示例和截图\`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to ${liveDir}/${progressPrefix}-${name}.progress. Just append; do not open, list or inspect that directory or any other file to learn the format.`;
   const lean = "Write the least code that does the step: reuse what the repo already has, then the stdlib; no new abstractions, options or files the card does not ask for. Keep the reply to the STATUS line, the files changed and what you could not do.";
   let execPrompt;
   if (isFix) {
