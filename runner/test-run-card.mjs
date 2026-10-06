@@ -482,6 +482,8 @@ No rm, no git push
     const resO1 = runCard("case-m", { args: ["--commit", "--message", "t"] });
     assert.strictEqual(resO1.status, 2, `Expected exit 2 while draft heading is present, got ${resO1.status}`);
 
+    assert.ok(["review_pass", "passed_no_review", "fix_passed", "recon_done"].includes(readState("case-m").outcome),
+      `case-m outcome must allow an accepted commit, got ${readState("case-m").outcome}`);
     const cardContent = fs.readFileSync(cardPath, "utf8");
     const withoutDraft = cardContent.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
     fs.writeFileSync(cardPath, `${withoutDraft}\n\n## Acceptance\n- verdict: accepted\n`, "utf8");
@@ -495,6 +497,113 @@ No rm, no git push
     assert.strictEqual(showRes.status, 0);
     const committedFiles = showRes.stdout.trim().split(/\r?\n/).filter(Boolean).sort();
     assert.deepStrictEqual(committedFiles, ["a.txt", "b.txt", "c.txt", "docs/orch/t/card.md"]);
+    passedCount++;
+  }
+
+  // Case O5 (commit-gate):
+  // (a) risk medium with ORCH_RUNNER_FAKE_REVIEW writing VERDICT: FAIL to docs/orch/t/review.md → outcome review_fail;
+  // replace the draft Acceptance with ## Acceptance\n- verdict: accepted\n; --commit --message t → exit 2,
+  // stderr contains commit refused: outcome=review_fail, verdict=accepted, and git rev-parse HEAD is unchanged.
+  // (b) same card, add the line - claude fix: fixed the finding → --commit exits 0.
+  // (c) a fresh pass run (fake review PASS) with - verdict: review pending → exit 2 with outcome does not allow this verdict.
+  // (d) a fresh pass run with - verdict: rejected → exit 2 with rejected cards are not committed.
+  // (e) a fresh pass run whose Acceptance has no verdict line (just ## Acceptance\n- files: a.txt\n) → exit 2 with no "- verdict:" line.
+  {
+    // (a)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "medium");
+    const envO5a = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: FAIL\\n' > docs/orch/t/review.md"
+    };
+    const resO5a = runCard("case-o5-a", { risk: "medium", env: envO5a });
+    assert.strictEqual(resO5a.status, 0, `Case O5(a) run status was ${resO5a.status}: ${resO5a.stderr}`);
+    const stateO5a = readState("case-o5-a");
+    assert.strictEqual(stateO5a.outcome, "review_fail");
+
+    const headBefore = spawnSync("git", ["-C", tempRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+
+    const cardContentA = fs.readFileSync(cardPath, "utf8");
+    const withoutDraftA = cardContentA.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
+    fs.writeFileSync(cardPath, `${withoutDraftA}\n\n## Acceptance\n- verdict: accepted\n`, "utf8");
+
+    const resO5aCommit = runCard("case-o5-a", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resO5aCommit.status, 2, `Expected exit 2 for Case O5(a) commit, got ${resO5aCommit.status}`);
+    assert.ok(
+      resO5aCommit.stderr.includes("commit refused: outcome=review_fail, verdict=accepted"),
+      `Case O5(a) stderr should contain 'commit refused: outcome=review_fail, verdict=accepted', got: ${resO5aCommit.stderr}`
+    );
+    const headAfter = spawnSync("git", ["-C", tempRepo, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    assert.strictEqual(headAfter, headBefore, "git rev-parse HEAD must be unchanged");
+
+    // (b)
+    fs.appendFileSync(cardPath, "- claude fix: fixed the finding\n", "utf8");
+    const resO5bCommit = runCard("case-o5-a", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resO5bCommit.status, 0, `Case O5(b) commit status was ${resO5bCommit.status}: ${resO5bCommit.stderr}`);
+
+    // (c)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "medium");
+    const envO5Pass = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md"
+    };
+    const resO5cRun = runCard("case-o5-c", { risk: "medium", env: envO5Pass });
+    assert.strictEqual(resO5cRun.status, 0, `Case O5(c) run status was ${resO5cRun.status}: ${resO5cRun.stderr}`);
+    const stateO5c = readState("case-o5-c");
+    assert.strictEqual(stateO5c.outcome, "review_pass");
+
+    const cardContentC = fs.readFileSync(cardPath, "utf8");
+    const withoutDraftC = cardContentC.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
+    fs.writeFileSync(cardPath, `${withoutDraftC}\n\n## Acceptance\n- verdict: review pending\n`, "utf8");
+
+    const resO5cCommit = runCard("case-o5-c", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resO5cCommit.status, 2, `Expected exit 2 for Case O5(c), got ${resO5cCommit.status}`);
+    assert.ok(
+      resO5cCommit.stderr.includes("outcome does not allow this verdict"),
+      `Case O5(c) stderr should contain 'outcome does not allow this verdict', got: ${resO5cCommit.stderr}`
+    );
+
+    // (d)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "medium");
+    const resO5dRun = runCard("case-o5-d", { risk: "medium", env: envO5Pass });
+    assert.strictEqual(resO5dRun.status, 0, `Case O5(d) run status was ${resO5dRun.status}: ${resO5dRun.stderr}`);
+    const stateO5d = readState("case-o5-d");
+    assert.strictEqual(stateO5d.outcome, "review_pass");
+
+    const cardContentD = fs.readFileSync(cardPath, "utf8");
+    const withoutDraftD = cardContentD.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
+    fs.writeFileSync(cardPath, `${withoutDraftD}\n\n## Acceptance\n- verdict: rejected\n`, "utf8");
+
+    const resO5dCommit = runCard("case-o5-d", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resO5dCommit.status, 2, `Expected exit 2 for Case O5(d), got ${resO5dCommit.status}`);
+    assert.ok(
+      resO5dCommit.stderr.includes("rejected cards are not committed"),
+      `Case O5(d) stderr should contain 'rejected cards are not committed', got: ${resO5dCommit.stderr}`
+    );
+
+    // (e)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "medium");
+    const resO5eRun = runCard("case-o5-e", { risk: "medium", env: envO5Pass });
+    assert.strictEqual(resO5eRun.status, 0, `Case O5(e) run status was ${resO5eRun.status}: ${resO5eRun.stderr}`);
+    const stateO5e = readState("case-o5-e");
+    assert.strictEqual(stateO5e.outcome, "review_pass");
+
+    const cardContentE = fs.readFileSync(cardPath, "utf8");
+    const withoutDraftE = cardContentE.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
+    fs.writeFileSync(cardPath, `${withoutDraftE}\n\n## Acceptance\n- files: a.txt\n`, "utf8");
+
+    const resO5eCommit = runCard("case-o5-e", { args: ["--commit", "--message", "t"] });
+    assert.strictEqual(resO5eCommit.status, 2, `Expected exit 2 for Case O5(e), got ${resO5eCommit.status}`);
+    assert.ok(
+      resO5eCommit.stderr.includes('no "- verdict:" line'),
+      `Case O5(e) stderr should contain 'no "- verdict:" line', got: ${resO5eCommit.stderr}`
+    );
+
     passedCount++;
   }
 
@@ -1150,11 +1259,11 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 31) {
-    console.log("31/31 passed");
+  if (passedCount === 32) {
+    console.log("32/32 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/31 passed`);
+    console.error(`Only ${passedCount}/32 passed`);
     process.exitCode = 1;
   }
 } finally {

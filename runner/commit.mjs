@@ -54,6 +54,32 @@ export function runCommit(args, ctx) {
     process.exit(2);
   }
 
+  const verdictMatch = acceptanceSection.match(/^-\s*verdict:\s*(accepted|review pending|rejected)\b/im);
+  const verdict = verdictMatch ? verdictMatch[1].toLowerCase() : "missing";
+  const hasClaudeFix = /^-\s*claude fix:\s*\S/im.test(acceptanceSection);
+  const outcome = state.outcome ?? "none";
+
+  const passOutcomes = new Set(["review_pass", "passed_no_review", "fix_passed", "recon_done"]);
+  const fixableOutcomes = new Set(["review_fail", "check_failed"]);
+
+  let allowed = false;
+  if (verdict === "accepted") {
+    allowed = passOutcomes.has(outcome) || (fixableOutcomes.has(outcome) && hasClaudeFix);
+  } else if (verdict === "review pending") {
+    allowed = outcome === "review_pending";
+  }
+
+  if (!allowed) {
+    let reason = "outcome does not allow this verdict";
+    if (verdict === "rejected") {
+      reason = "rejected cards are not committed";
+    } else if (verdict === "missing") {
+      reason = 'no "- verdict:" line in ## Acceptance';
+    }
+    console.error(`commit refused: outcome=${outcome}, verdict=${verdict}: ${reason}`);
+    process.exit(2);
+  }
+
   const allTouched = state.allTouched || (state.rounds ? state.rounds.flatMap((r) => r.touched || []) : state.touched) || [];
   const mayChange = state.mayChange || [];
   const inScope = [...new Set(allTouched)].filter((p) =>
