@@ -1,6 +1,6 @@
 // Token use of one orchestrate task, for its ## Acceptance line.
 // Usage: node ledger.mjs <name> [--json]   (no name: every stream in agent-live)
-// Reads ~/.claude/agent-live/{agy,codex,codex-review}-<name>.jsonl; run it before the next same-name dispatch clears them.
+// Reads ~/.claude/agent-live/{agy,codex,codex-review,codex-plan}-<name>.jsonl; run it before the next same-name dispatch clears them.
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 
@@ -10,7 +10,7 @@ const args = process.argv.slice(2).filter((a) => a !== "--json");
 const name = args[0];
 // run-<name> streams are plain script output with no token use: only executor and review streams count.
 const files = (existsSync(dir) ? readdirSync(dir) : [])
-  .filter((f) => /^(agy|codex-review|codex)-.+\.jsonl$/.test(f) && (!name || f.replace(/^(agy|codex-review|codex)-/, "") === `${name}.jsonl`))
+  .filter((f) => /^(agy|codex-review|codex-plan|codex)-.+\.jsonl$/.test(f) && (!name || f.replace(/^(agy|codex-review|codex-plan|codex)-/, "") === `${name}.jsonl`))
   .sort();
 if (!files.length) {
   console.error(`没有 ${name ? `${name} 的` : ""}执行或审查数据流：${dir}`);
@@ -58,7 +58,7 @@ for (const f of files) {
       fresh = resultFresh; cached = resultCached; out = resultOut;
     }
   }
-  const role = f.startsWith("codex-review-") ? "review" : "exec";
+  const role = f.startsWith("codex-review-") ? "review" : f.startsWith("codex-plan-") ? "plan" : "exec";
   const m = model || f.split("-")[0];
   if (isJson) {
     results.push({ role, model: m, fresh, cached, out, file: f });

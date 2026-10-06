@@ -124,7 +124,7 @@ if (args.reviewer !== undefined && !["luna", "sol"].includes(args.reviewer)) {
 
 // luna and sol never fall back: refuse to start when codex's quota is full.
 // Reviews are not prechecked (they go review_pending instead).
-const needsCodex = !args.commit && ["luna", "sol"].includes(executor);
+const needsCodex = !args.commit && (["luna", "sol"].includes(executor) || (risk === "high" && !isFix && !recon));
 const quota = needsCodex ? quotaOf("codex") : null;
 if (quota?.full) {
   const { five, week } = quota;
@@ -418,11 +418,56 @@ if (isFix) {
   fs.rmSync(path.posix.join(liveDir, `${execPrefix}-${name}.progress`), { force: true });
   fs.rmSync(path.posix.join(liveDir, `${execPrefix}-${name}.exit`), { force: true });
 } else {
-  for (const prefix of ["agy", "codex", "codex-review"]) {
+  for (const prefix of ["agy", "codex", "codex-review", "codex-plan"]) {
     for (const ext of ["jsonl", "progress", "exit"]) {
       fs.rmSync(path.posix.join(liveDir, `${prefix}-${name}.${ext}`), { force: true });
     }
   }
+}
+
+// Plan review
+if (!state.outcome && risk === "high" && !isFix && !recon) {
+  const planPrompt = `Read ${cardAbs} and only the code it names (the files in ## Files and the functions in ## Steps). This card will be carried out step by step by another agent; your job is to find problems in the card itself, before execution. Do not modify or create files and do not run tests or scripts. Look for: a step that contradicts the current code (wrong function, line or behaviour), a check or invariant some path can bypass, a Parameters value that disagrees with the code or the Goal, a Check that would pass without the Goal being met, steps in an order that breaks one another, a step that is ambiguous enough to be done two ways. Reply: first line exactly PLAN: OK or PLAN: REVISE, then at most 5 findings, most severe first, each naming the card step or section, the file:line it conflicts with, the problem and the change to the card. No style or wording remarks. PLAN: REVISE only for a finding that would make a faithful execution wrong.`;
+  const planStream = path.posix.join(liveDir, `codex-plan-${name}.jsonl`);
+  const planExit = path.posix.join(liveDir, `codex-plan-${name}.exit`);
+  const planOut = path.posix.join(stateDir, `${name}.plan.md`);
+  fs.rmSync(planOut, { force: true });
+
+  let planCmd;
+  if (process.env.ORCH_RUNNER_FAKE_PLAN) {
+    planCmd = `{\nexport ORCH_PLAN_OUT=${q(planOut)}\nORCH_PLAN_OUT=${q(planOut)}\n${process.env.ORCH_RUNNER_FAKE_PLAN}\n} > ${q(planStream)} 2>&1`;
+  } else {
+    const skipGitFlag = isGit ? "" : " --skip-git-repo-check";
+    planCmd = `{ echo '{"model":"gpt-6.1-sol"}'; codex exec${skipGitFlag} -s read-only -m gpt-6.1-sol -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(planOut)} --json ${q(planPrompt)} < /dev/null; } > ${q(planStream)} 2>&1`;
+  }
+
+  const planRes = await runBash(planCmd, { cwd: repoAbs, timeoutMin: Math.min(20, remainingMin()), exitPath: planExit });
+
+  let verdict = "error";
+  if (!planRes.timedOut && planRes.exit === 0 && fs.existsSync(planOut)) {
+    let firstLine = "";
+    try {
+      const content = fs.readFileSync(planOut, "utf8");
+      firstLine = content.split(/\r?\n/)[0]?.trim() || "";
+    } catch {}
+    if (firstLine === "PLAN: OK") {
+      verdict = "OK";
+    } else if (firstLine === "PLAN: REVISE") {
+      verdict = "REVISE";
+    }
+  }
+
+  state.plan = {
+    model: "gpt-6.1-sol",
+    verdict,
+    file: planOut
+  };
+  if (verdict === "REVISE") {
+    state.outcome = "plan_revise";
+  } else if (verdict === "error") {
+    state.outcome = "plan_error";
+  }
+  save(state);
 }
 
 // 4. Executor
@@ -600,7 +645,7 @@ try {
   state.ledger = [];
 }
 // A fix runs no review: the review stream left from round 1 is not this round's cost.
-if (isFix) state.ledger = state.ledger.filter((row) => row.role !== "review");
+if (isFix) state.ledger = state.ledger.filter((row) => row.role !== "review" && row.role !== "plan");
 let fixDiffContent = "";
 let fixDiffFile = null;
 if (isFix) {
@@ -675,6 +720,21 @@ const execExit = state.exec?.exit !== null && state.exec?.exit !== undefined ? s
 const execStatus = state.exec?.status ?? "n/a";
 const execMins = state.exec?.seconds != null ? (state.exec.seconds / 60).toFixed(1) : "0.0";
 lines.push(`executor: ${executor}${state.execViaWb ? ` → wb deepseek-v4.1-flash (agy fallback)` : ""} exit=${execExit} status=${execStatus} ${execMins}m`);
+if (state.plan) {
+  lines.push(`plan: ${state.plan.model} PLAN: ${state.plan.verdict}`);
+  if (state.plan.verdict === "REVISE" && state.plan.file && fs.existsSync(state.plan.file)) {
+    try {
+      const planContent = fs.readFileSync(state.plan.file, "utf8");
+      const planLines = planContent.split(/\r?\n/).slice(1, 16);
+      while (planLines.length > 0 && !planLines[planLines.length - 1].trim()) {
+        planLines.pop();
+      }
+      if (planLines.length > 0) {
+        lines.push(planLines.join("\n"));
+      }
+    } catch {}
+  }
+}
 
 const touchedStr = state.touched && state.touched.length > 0 ? state.touched.join(", ") : "-";
 const nonJunkOutOfScope = (state.outOfScope || []).filter((p) => !isJunkPath(p));

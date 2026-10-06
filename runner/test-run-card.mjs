@@ -80,7 +80,8 @@ No rm, no git push
     ...process.env,
     ORCH_RUNNER_LIVE_DIR: tempLive,
     ORCH_AGY_FALLBACK_FILE: `${tempLive}/agy-fallback`,
-    ORCH_QUOTA_SCRIPT: `${tempLive}/no-quota.mjs`
+    ORCH_QUOTA_SCRIPT: `${tempLive}/no-quota.mjs`,
+    ORCH_RUNNER_FAKE_PLAN: "echo 'PLAN: OK' > \"$ORCH_PLAN_OUT\""
   };
 
   fakeBin = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-bin-")).replaceAll("\\", "/");
@@ -1512,11 +1513,139 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 34) {
-    console.log("34/34 passed");
+  // Case PR (plan-review):
+  // (a) risk high, fake plan OK, fake exec + fake review PASS → review_pass, state.plan.verdict === "OK", stdout has plan: gpt-6.1-sol PLAN: OK;
+  // (b) risk high, fake plan writing PLAN: REVISE + a line - step 2 is wrong, fake exec creating exec-ran.txt → outcome plan_revise, exec-ran.txt absent, stdout has - step 2 is wrong;
+  // (c) fake plan writing nothing → plan_error, exec not run;
+  // (d) risk medium → state.plan undefined;
+  // (e) a --fix 1 round on a high-risk card → the fake plan is not run (have it write a marker file and assert it is absent);
+  // (f) risk high with the codex-full quota script → exit 2, no state file.
+  {
+    // (a)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "high");
+    const envPRa = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_PLAN: "echo 'PLAN: OK' > \"$ORCH_PLAN_OUT\"",
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md"
+    };
+    const resPRa = runCard("case-pr-a", { risk: "high", env: envPRa });
+    assert.strictEqual(resPRa.status, 0, `Case PR(a) exit status was ${resPRa.status}: ${resPRa.stderr}`);
+    const statePRa = readState("case-pr-a");
+    assert.strictEqual(statePRa.outcome, "review_pass");
+    assert.strictEqual(statePRa.plan?.verdict, "OK");
+    assert.ok(
+      resPRa.stdout.includes("plan: gpt-6.1-sol PLAN: OK"),
+      `Case PR(a) stdout should contain 'plan: gpt-6.1-sol PLAN: OK', got: ${resPRa.stdout}`
+    );
+
+    // (b)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "high");
+    const markerB = path.join(tempRepo, "exec-ran.txt").replaceAll("\\", "/");
+    fs.rmSync(markerB, { force: true });
+    const envPRb = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_PLAN: "printf 'PLAN: REVISE\\n- step 2 is wrong\\n' > \"$ORCH_PLAN_OUT\"",
+      ORCH_RUNNER_FAKE_EXEC: `node -e "require('fs').writeFileSync('${markerB}','')"; echo 'STATUS: done'`
+    };
+    delete envPRb.ORCH_RUNNER_FAKE_REVIEW;
+    const resPRb = runCard("case-pr-b", { risk: "high", env: envPRb });
+    assert.strictEqual(resPRb.status, 0, `Case PR(b) exit status was ${resPRb.status}: ${resPRb.stderr}`);
+    const statePRb = readState("case-pr-b");
+    assert.strictEqual(statePRb.outcome, "plan_revise");
+    assert.strictEqual(fs.existsSync(markerB), false, "exec-ran.txt should be absent");
+    assert.ok(
+      resPRb.stdout.includes("- step 2 is wrong"),
+      `Case PR(b) stdout should contain '- step 2 is wrong', got: ${resPRb.stdout}`
+    );
+
+    // (c)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "high");
+    const markerC = path.join(tempRepo, "exec-ran-c.txt").replaceAll("\\", "/");
+    fs.rmSync(markerC, { force: true });
+    const envPRc = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_PLAN: "true > \"$ORCH_PLAN_OUT\"",
+      ORCH_RUNNER_FAKE_EXEC: `node -e "require('fs').writeFileSync('${markerC}','')"; echo 'STATUS: done'`
+    };
+    delete envPRc.ORCH_RUNNER_FAKE_REVIEW;
+    const resPRc = runCard("case-pr-c", { risk: "high", env: envPRc });
+    assert.strictEqual(resPRc.status, 0, `Case PR(c) exit status was ${resPRc.status}: ${resPRc.stderr}`);
+    const statePRc = readState("case-pr-c");
+    assert.strictEqual(statePRc.outcome, "plan_error");
+    assert.strictEqual(fs.existsSync(markerC), false, "exec should not run");
+
+    // (d)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "medium");
+    const envPRd = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md"
+    };
+    const resPRd = runCard("case-pr-d", { risk: "medium", env: envPRd });
+    assert.strictEqual(resPRd.status, 0, `Case PR(d) exit status was ${resPRd.status}: ${resPRd.stderr}`);
+    const statePRd = readState("case-pr-d");
+    assert.strictEqual(statePRd.plan, undefined);
+
+    // (e)
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "high");
+    const envPRe1 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_PLAN: "echo 'PLAN: OK' > \"$ORCH_PLAN_OUT\"",
+      ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md"
+    };
+    const resPRe1 = runCard("case-pr-e", { risk: "high", env: envPRe1 });
+    assert.strictEqual(resPRe1.status, 0, `Case PR(e) round 1 exit status was ${resPRe1.status}: ${resPRe1.stderr}`);
+    const statePRe1 = readState("case-pr-e");
+    assert.strictEqual(statePRe1.outcome, "review_pass");
+
+    fs.appendFileSync(cardPath, "\n## Fix 1\n1. Fix step.\n", "utf8");
+    const fixPlanMarker = path.join(tempRepo, "fix-plan-marker.txt").replaceAll("\\", "/");
+    fs.rmSync(fixPlanMarker, { force: true });
+    const envPRe2 = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_PLAN: `node -e "require('fs').writeFileSync('${fixPlanMarker}','')"; echo 'PLAN: OK' > "$ORCH_PLAN_OUT"`,
+      ORCH_RUNNER_FAKE_EXEC: "echo 4 > a.txt; echo 'STATUS: done'"
+    };
+    delete envPRe2.ORCH_RUNNER_FAKE_REVIEW;
+    const resPRe2 = runCard("case-pr-e", { args: ["--fix", "1"], env: envPRe2 });
+    assert.strictEqual(resPRe2.status, 0, `Case PR(e) fix 1 exit status was ${resPRe2.status}: ${resPRe2.stderr}`);
+    assert.strictEqual(fs.existsSync(fixPlanMarker), false, "fake plan marker should be absent on fix 1");
+
+    // (f)
+    resetRepo();
+    writeCard(undefined, "high");
+    const quotaFullScript = path.join(tempLive, "quota-full-pr.mjs").replaceAll("\\", "/");
+    fs.writeFileSync(
+      quotaFullScript,
+      'console.log(JSON.stringify({ codex: { five: { pct: 100, resetMs: Date.now() + 3600000 }, week: { pct: 40, resetMs: Date.now() + 86400000 } } }))',
+      "utf8"
+    );
+    const envPRf = {
+      ...baseEnv,
+      ORCH_QUOTA_SCRIPT: quotaFullScript
+    };
+    delete envPRf.ORCH_RUNNER_FAKE_EXEC;
+    delete envPRf.ORCH_RUNNER_FAKE_REVIEW;
+    const resPRf = runCard("case-pr-f", { risk: "high", env: envPRf });
+    assert.strictEqual(resPRf.status, 2, `Case PR(f) exit status was ${resPRf.status}: ${resPRf.stderr}`);
+    const stateFilePRf = path.join(tempLive, "orch-runner", "case-pr-f.json");
+    assert.strictEqual(fs.existsSync(stateFilePRf), false, "State file must not exist for case-pr-f");
+
+    passedCount++;
+  }
+
+  if (passedCount === 35) {
+    console.log("35/35 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/34 passed`);
+    console.error(`Only ${passedCount}/35 passed`);
     process.exitCode = 1;
   }
 } finally {
