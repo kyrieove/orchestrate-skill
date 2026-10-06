@@ -4,7 +4,18 @@
 Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.claude` 里面的路径每次编辑都要确认）。
 旧副本备份在 `~/.claude/_archive/2026-10-05/orchestrate`。
 
-## 2026-10-05 晚（最新，新会话先读）
+## 2026-10-06（最新，新会话先读）
+
+- 借鉴同类项目的 5 步改造全部完成（调研见 `D:/2/dev/orch-runner/research-similar-projects.md`）：
+  1. 审查只走 codex，额度满 → `review_pending`；审查档位只升不降（`--reviewer luna` 降不了 sol）。wb 只做 agy 备选（`agy-fallback`，默认 auto）。
+  2. `--commit` 门槛：outcome 与 Acceptance verdict 不一致就拒绝；`review_fail`/`check_failed` 要有 `- claude fix:` 行。
+  3. 基线 Check：派发前先跑一次 Check，摘要 `baseline check:`；基线动了只读路径 → 不启动执行者。
+  4. 结果过期：Check 后记录指纹，`--commit` 发现之后又改过 / 最近 Check 失败 → 拒绝；`--recheck --name` 重跑 Check 刷新。
+  5. 高风险卡派发前 sol 只读计划审查：`PLAN: REVISE` → `plan_revise`，执行者不启动。
+- 进度行规则：Y 30–50 字，只要看得出做到哪一步。
+- 已知：sol 打回（review_fail）的卡不会自动生成 Acceptance 草稿，需手写。
+
+## 2026-10-05 晚
 
 - 新执行者 `wb`：CodeBuddy CLI（`npm i -g @tencent-ai/codebuddy-code`，已登录），`deepseek-v4.1-flash` + `--effort high`；
   `/wb` 命令；`/orch` 每次先问「写代码交给 agy 还是 wb」。用户规定 DeepSeek 一律用 flash。
