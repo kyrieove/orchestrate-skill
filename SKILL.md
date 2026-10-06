@@ -104,8 +104,9 @@ conformance review catches a wrong number; only an independent recompute does.
    node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl
    ```
    Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
-   command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` → luna/sol executor and codex quota full: tell the user), snapshots git status + content
-   hashes, runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
+   command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` → codex quota full for a luna/sol executor or a high-risk card: tell the user), snapshots git status + content
+   hashes, runs the Check once as a baseline (summary `baseline check:`; red before the executor = not its fault), for high
+   risk runs a read-only sol plan review of the card (`PLAN: REVISE` stops before execution), runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
    prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
    change is out of scope. `--timeout-min` (default 100, the Bash job dies at 120). `--reviewer sol`: shared tooling at medium risk (Review layer 2). Not a git repo: works on a
@@ -125,10 +126,14 @@ conformance review catches a wrong number; only an independent recompute does.
    | `readonly_violated` | 🛑 show the changed read-only paths to the user |
    | `blocked`, `failed`, `interrupted` | read the reply / stream tail; executor failures follow **Executor fails** above |
    | `review_pending` | codex quota ran out: **Reviewer out of quota** above |
+   | `plan_revise` | high risk only: sol's pre-execution plan review found a card problem (findings in the summary); nothing ran — fix the card, dispatch again |
+   | `plan_error` | the plan review produced no `PLAN:` line or died: read `codex-plan-<name>.jsonl`, fix the cause, dispatch again |
    | `review_error` | read the tail of `codex-review-<name>.jsonl`: anything else (bad config, no VERDICT twice) → fix the cause and re-run the review — no provisional acceptance |
 5. **Fix.** A real finding whose fix is a few mechanical lines (a missing check, a wrong regex, a duplicate
    declaration): Claude fixes it directly — except in fixed modes or when the user asked Claude not to implement
-   (same rule as **Who writes**) — re-runs the Check, and says so in Acceptance — an executor fix round costs
+   (same rule as **Who writes**) — runs `node ~/.claude/skills/orchestrate/runner/run-card.mjs --recheck --name <name>` (the card's Check on
+   the current tree; `--commit` refuses files changed since the last Check, or a last Check that failed), and adds a
+   `- claude fix: <what>` line to Acceptance (`--commit` needs it to accept a `review_fail` / `check_failed` run) — an executor fix round costs
    ~0.3 M fresh + 3 M cached tokens (2026-10-05). Anything larger: append `## Fix N` to the card (exact steps), then
    `node ~/.claude/skills/orchestrate/runner/run-card.mjs --fix N --fresh --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
    It runs the executor (`--fresh`: a new agy session — 2026-10-05 a fresh Fix 1 cost 103k fresh tokens, a continued one 799k; drop it to continue),
