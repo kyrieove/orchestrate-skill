@@ -12,7 +12,7 @@ export function formatLedgerLines(ledger, sep = "\n") {
 export function appendAcceptanceDraft(ctx) {
   const { state, cardAbs, check, risk } = ctx;
 
-  const draftOutcomes = new Set(["review_pass", "passed_no_review", "fix_passed", "recon_done", "review_pending"]);
+  const draftOutcomes = new Set(["review_pass", "passed_no_review", "fix_passed", "recon_done", "review_pending", "review_fail", "check_failed"]);
   if (draftOutcomes.has(state.outcome)) {
     const currentCardText = fs.readFileSync(cardAbs, "utf8");
     const cLines = currentCardText.split(/\r?\n/);

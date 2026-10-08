@@ -4,7 +4,15 @@
 Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.claude` 里面的路径每次编辑都要确认）。
 旧副本备份在 `~/.claude/_archive/2026-10-05/orchestrate`。
 
-## 2026-10-06（最新，新会话先读）
+## 2026-10-08（最新，新会话先读）
+
+- 彻底修复与精简（测试 42/42 passed）：
+  1. `ledger.mjs` 补齐 CodeBuddy（wb）usage 解析：支持 `e.type === "result"` 的 `usage`（input_tokens, cache_read_input_tokens, output_tokens），wb 卡片不再显示 0k。
+  2. `runner/acceptance.mjs`：`review_fail` 与 `check_failed` 也自动生成 `## Acceptance (draft)` 草稿，Claude 手工修复时无需手写模板。
+  3. 拆分主流程：终端摘要打印逻辑抽离至 `runner/summary.mjs`，`run-card.mjs` 减少 100+ 行。
+  4. 测试补充：`runner/test-run-card.mjs` 扩至 42 个用例，覆盖 wb usage 解析与 review_fail 草稿生成。
+
+## 2026-10-06
 
 - 借鉴同类项目的 5 步改造全部完成（调研见 `D:/2/dev/orch-runner/research-similar-projects.md`）：
   1. 审查只走 codex，额度满 → `review_pending`；审查档位只升不降（`--reviewer luna` 降不了 sol）。wb 只做 agy 备选（`agy-fallback`，默认 auto）。

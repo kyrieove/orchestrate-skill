@@ -48,6 +48,12 @@ for (const f of files) {
         fresh += (u.input_tokens ?? 0) - (u.cached_input_tokens ?? 0);
         cached += u.cached_input_tokens ?? 0;
         out += u.output_tokens ?? 0;
+      } else if (e.type === "result" && (e.usage || e.result?.usage)) {
+        const u = e.usage ?? e.result?.usage;
+        const cachedTokens = u.cache_read_input_tokens ?? u.cached_input_tokens ?? 0;
+        fresh += Math.max(0, (u.input_tokens ?? 0) - cachedTokens);
+        cached += cachedTokens;
+        out += u.output_tokens ?? 0;
       }
     }
   }

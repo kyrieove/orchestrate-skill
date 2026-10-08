@@ -10,6 +10,7 @@ const __dirname = path.dirname(__filename);
 const runCardScript = path.resolve(__dirname, "run-card.mjs").replaceAll("\\", "/");
 const runLongScript = path.resolve(__dirname, "run-long.mjs").replaceAll("\\", "/");
 const statsScript = path.resolve(__dirname, "stats.mjs").replaceAll("\\", "/");
+const ledgerScript = path.resolve(__dirname, "../ledger.mjs").replaceAll("\\", "/");
 
 // Run inside a git hook, GIT_DIR/GIT_INDEX_FILE etc. are inherited and would point the temp-repo git calls at the outer repo.
 for (const k of Object.keys(process.env)) if (k.startsWith("GIT_")) delete process.env[k];
@@ -1732,11 +1733,66 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 40) {
-    console.log("40/40 passed");
+  // Case wb-ledger: CodeBuddy usage parsing in ledger.mjs.
+  {
+    const wbStreamPath = path.join(tempLive, "codex-case-wb-usage.jsonl");
+    const wbStreamContent = [
+      JSON.stringify({ model: "deepseek-v4.1-flash" }),
+      JSON.stringify({ type: "assistant", message: { content: [{ type: "text", text: "STATUS: done" }] } }),
+      JSON.stringify({
+        type: "result",
+        subtype: "success",
+        is_error: false,
+        result: "STATUS: done",
+        usage: {
+          input_tokens: 50000,
+          cache_read_input_tokens: 42000,
+          output_tokens: 1500
+        }
+      })
+    ].join("\n");
+    fs.writeFileSync(wbStreamPath, wbStreamContent, "utf8");
+    const resLedger = spawnSync(process.execPath, [ledgerScript, "case-wb-usage", "--json"], {
+      env: { ...baseEnv, ORCH_RUNNER_LIVE_DIR: tempLive },
+      encoding: "utf8"
+    });
+    assert.strictEqual(resLedger.status, 0, resLedger.stderr);
+    const parsed = JSON.parse(resLedger.stdout.trim());
+    assert.strictEqual(parsed.length, 1);
+    assert.strictEqual(parsed[0].model, "deepseek-v4.1-flash");
+    assert.strictEqual(parsed[0].fresh, 8000);
+    assert.strictEqual(parsed[0].cached, 42000);
+    assert.strictEqual(parsed[0].out, 1500);
+    passedCount++;
+  }
+
+  // Case review-fail-draft: a review_fail card gets ## Acceptance (draft) appended automatically.
+  {
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "medium");
+    const envFail = {
+      ...baseEnv,
+      ORCH_RUNNER_FAKE_EXEC: "echo 4 > a.txt; echo 'STATUS: done'",
+      ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: FAIL\\n1. finding\\n' > docs/orch/t/review.md"
+    };
+    const res = runCard("case-rf-draft", { risk: "medium", env: envFail });
+    assert.strictEqual(res.status, 0, res.stderr);
+    const state = readState("case-rf-draft");
+    assert.strictEqual(state.outcome, "review_fail");
+    const cardText = fs.readFileSync(cardPath, "utf8");
+    assert.ok(cardText.includes("## Acceptance (draft)"), "card should contain ## Acceptance (draft)");
+    assert.ok(cardText.includes("- files: a.txt"), "draft should contain touched files");
+    assert.ok(cardText.includes("- check:"), "draft should contain check command");
+    assert.ok(cardText.includes("- tokens:"), "draft should contain tokens line");
+    assert.ok(cardText.includes("- review findings:"), "draft should contain review findings line");
+    passedCount++;
+  }
+
+  if (passedCount === 42) {
+    console.log("42/42 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/40 passed`);
+    console.error(`Only ${passedCount}/42 passed`);
     process.exitCode = 1;
   }
 } finally {
