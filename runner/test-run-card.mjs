@@ -1144,6 +1144,25 @@ No rm, no git push
     passedCount++;
   }
 
+  // Case EC: --exec-check changes the executor prompt and is kept in state; the default prompt is unchanged.
+  {
+    resetRepo();
+    writeCard();
+    fs.rmSync(`${fakeBin}/argv`, { force: true });
+    assert.strictEqual(runCard("case-ec0", { env: wbEnv, args: ["--executor", "wb"] }).status, 0);
+    assert.ok(fs.readFileSync(`${fakeBin}/argv`, "utf8").includes("do NOT run the Check"), "default prompt keeps the no-Check rule");
+    fs.rmSync(`${fakeBin}/argv`, { force: true });
+    resetRepo();
+    writeCard();
+    assert.strictEqual(runCard("case-ec1", { env: wbEnv, args: ["--executor", "wb", "--exec-check"] }).status, 0);
+    const argvEC = fs.readFileSync(`${fakeBin}/argv`, "utf8");
+    assert.ok(argvEC.includes("at most 3 attempts") && !argvEC.includes("do NOT run the Check"), "exec-check prompt");
+    assert.strictEqual(readState("case-ec1").execCheck, true);
+    assert.strictEqual(readState("case-ec0").execCheck, false);
+    fs.rmSync(`${fakeBin}/argv`, { force: true });
+    passedCount++;
+  }
+
   // Case Q: --executor luna with the codex-full quota script and no fallback file: exit 2, stderr has
   // codex quota used up (5h 100%, 7d 40% and pick another executor, no state file.
   {
@@ -1788,11 +1807,11 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 42) {
-    console.log("42/42 passed");
+  if (passedCount === 43) {
+    console.log("43/43 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/42 passed`);
+    console.error(`Only ${passedCount}/43 passed`);
     process.exitCode = 1;
   }
 } finally {

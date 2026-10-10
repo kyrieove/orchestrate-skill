@@ -48,7 +48,7 @@ export function filterReadOnly(paths, stateDir, state) {
 }
 
 export function parseArgs(args) {
-  const booleanFlags = new Set(["recon", "commit", "fresh", "recheck", "review-only"]);
+  const booleanFlags = new Set(["recon", "commit", "fresh", "recheck", "review-only", "exec-check"]);
   const parsed = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];

@@ -96,7 +96,7 @@ conformance review catches a wrong number; only an independent recompute does.
 1. **Read just enough.** `grep -n` / `sed -n 'a,bp'` on the code the change touches. For a large
    unfamiliar area, first send a read-only recon card ("summarise X: functions, call sites, data
    flow, ≤ 40 lines", dispatched with `--recon`) and plan from its summary.
-2. **Write the card** — `docs/orch/<yyyy-mm-dd>-<name>/card.md` in the project (sections below).
+2. **Write the card** — `docs/orch/<yyyy-mm-dd>-<name>/card.md` in the project (sections below). Start from `~/.claude/skills/orchestrate/card-template.md`.
    One task per card. Show the user the card before dispatching when it writes to data folders or
    does anything irreversible; otherwise dispatch.
 3. **Dispatch through the runner** — one background Bash (`run_in_background`, `timeout` 7200000, cwd = repo), no heartbeat:
@@ -109,7 +109,7 @@ conformance review catches a wrong number; only an independent recompute does.
    risk runs a read-only sol plan review of the card (`PLAN: REVISE` stops before execution), runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
    prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
-   change is out of scope. `--timeout-min` (default 100, the Bash job dies at 120). `--reviewer sol`: shared tooling at medium risk (Review layer 2). Not a git repo: works on a
+   change is out of scope. `--exec-check`: the executor runs the card's Check itself (up to 3 attempts) before replying; the runner still re-runs it as the evidence. Recommended when the Check finishes in under 2 minutes; kept in the state file for `--fix N`. `--timeout-min` (default 100, the Bash job dies at 120). `--reviewer sol`: shared tooling at medium risk (Review layer 2). Not a git repo: works on a
    size/mtime snapshot; `--commit` refuses. State: `~/.claude/agent-live/orch-runner/<name>.json`.
    **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
    run in the background with `node ~/.claude/skills/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`

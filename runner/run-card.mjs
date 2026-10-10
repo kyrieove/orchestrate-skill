@@ -355,6 +355,7 @@ if (isFix) {
     executor,
     risk,
     reviewer: args.reviewer,
+    execCheck: args["exec-check"] === true,
     repo: repoAbs,
     git: isGit,
     check,
