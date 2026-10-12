@@ -72,6 +72,12 @@ Three layers:
 3. **Acceptance** — Claude only. Reads `review.md`, `git diff --stat`, the flagged hunks (`file:line`
    from the review) and the product (open the figure, run the CLI, read the numbers). Not the full diff.
 
+**When a review is done** (user, 2026-10-11; an LLM review finds something new every round, so "no findings" is
+never the stop signal). Every finding carries [P0]–[P3] and a code line that confirms it. Only P0/P1 (changes
+behaviour, a result or a Parameters value, breaks the Goal or Check) block acceptance; P2/P3 go into Acceptance as
+`deferred:` and are not fixed in this card. At most two review rounds per card: the first review, then one look at the
+fix diff only — never a fresh full review. P0/P1 still open after that → the user decides.
+
 Claude writes the tier into the card (`## Risk`). If a task fits several tiers, take the highest; if
 unsure, go one up. The dispatch line names the tier (`派发 agy · risk=high · 将重算 <X>`) so the user can
 override it.
@@ -101,7 +107,7 @@ conformance review catches a wrong number; only an independent recompute does.
    does anything irreversible; otherwise dispatch.
 3. **Dispatch through the runner** — one background Bash (`run_in_background`, `timeout` 7200000, cwd = repo), no heartbeat:
    ```bash
-   node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl
+   node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl agent-live/codex-plan-<name>.jsonl
    ```
    Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
    command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` → codex quota full for a luna/sol executor or a high-risk card: tell the user), snapshots git status + content
@@ -169,6 +175,8 @@ conformance review catches a wrong number; only an independent recompute does.
                review because a cache hit returned before the new check.)
 ## Check       one command in backticks (or a fenced block), the fastest existing test that proves the goal; add ONE small new test
                only for a bug with a crisp repro, and spell it out here
+## Expect      optional. `green` = a refactor: the Check is meant to pass before the change too (no baseline WARNING).
+               Otherwise the runner prints WARNING when the Check already passes before the change: add a test that fails on the old code.
 ## Don't       no commits, no other files, no refactors beyond the steps, reuse helper X instead of copying; and always:
                "Run scripts in the foreground and wait; before replying, stop any background task still running."
                "Reuse existing functions; don't copy existing logic." "No rm, no git push, no git checkout . / restore . / reset --hard."
@@ -263,7 +271,7 @@ whole file. If the last line is not a result (crash, killed), read the last few 
 `gpt-6-luna` for medium risk, `gpt-6.1-sol` for high):
 
 ```bash
-{ echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: <paths from the before snapshot>. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each with file:line, the problem and the fix — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
+{ echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: <paths from the before snapshot>. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each starting with a priority tag, then file:line, the problem, the fix and the code line that confirms it (read it; drop any finding you cannot confirm in the code) — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files. Priority: [P0]/[P1] = changes behaviour, a computed result or a Parameters value, breaks the card's Goal or Check, bypasses a check, or skips a step; [P2]/[P3] = everything else. VERDICT: FAIL only when at least one [P0] or [P1] finding exists." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
 ```
 
 **wb executes** (`/wb`, or an agy card while agy's quota is full): the codex exec command with
