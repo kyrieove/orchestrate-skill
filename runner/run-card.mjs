@@ -411,11 +411,14 @@ if (!isFix && !recon && check) {
   }
   baseTouched.sort();
   // `before` is not retaken: a Check that writes outside ## Files must still show up as out of scope (Case T).
+  // `## Expect` green marks a refactor, where the Check is meant to pass before the change too.
+  const expectGreen = /^green\b/i.test((getSection(cardText, "Expect") || "").trim());
   state.baselineCheck = {
     exit: baseRes.exit,
     timedOut: Boolean(baseRes.timedOut),
     log: baselineLog,
-    touched: baseTouched
+    touched: baseTouched,
+    greenBefore: baseRes.exit === 0 && !baseRes.timedOut && !expectGreen
   };
   save(state);
 }

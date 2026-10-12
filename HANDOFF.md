@@ -4,7 +4,15 @@
 Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.claude` 里面的路径每次编辑都要确认）。
 旧副本备份在 `~/.claude/_archive/2026-10-05/orchestrate`。
 
-## 2026-10-08（最新，新会话先读）
+## 2026-10-12（最新，新会话先读）
+
+- 基线与解析报数（测试 46/46 passed）：
+  1. 基线 Check 一开始就通过 → 摘要打 `WARNING`（`baselineCheck.greenBefore`）。卡片写 `## Expect` 的 `green` 表示重构，不警告。
+  2. `runner/stats.mjs` 打印 `skipped unreadable state files`；`ledger.mjs` 打印坏行数，以及“有内容但找不到 token 用量”的警告（走 stderr，`--json` 不受影响）。
+- 未做：`card-template.md` 和 `SKILL.md` 还没写 `## Expect` 的说明。`SKILL.md` 有别人未提交的改动（P0/P1 审查规则、plan 审查路径），提交时不带上它。
+- 已知：Expect green 的卡，`greenBefore` 是 false（字段名和实际含义不完全一致，见 `runner/run-card.mjs` 那段注释）。
+
+## 2026-10-08
 
 - 彻底修复与精简（测试 42/42 passed）：
   1. `ledger.mjs` 补齐 CodeBuddy（wb）usage 解析：支持 `e.type === "result"` 的 `usage`（input_tokens, cache_read_input_tokens, output_tokens），wb 卡片不再显示 0k。

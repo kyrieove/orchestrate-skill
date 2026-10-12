@@ -70,6 +70,9 @@ export function printSummary(ctx) {
       bLine += `   baseline wrote: ${bTouched.join(", ")}`;
     }
     lines.push(bLine);
+    if (state.baselineCheck.greenBefore) {
+      lines.push("WARNING: the Check already passes before the change, so it does not show the change works. Add a test that fails on the old code; a refactor card says `## Expect` green.");
+    }
   }
   if (checkExit !== "skipped" && checkExit !== 0 && fs.existsSync(checkLog)) {
     const logLines = fs.readFileSync(checkLog, "utf8").split(/\r?\n/).filter(Boolean);

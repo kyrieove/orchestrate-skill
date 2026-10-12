@@ -12,6 +12,7 @@ if (!fs.existsSync(stateDir)) {
 
 const files = fs.readdirSync(stateDir).filter((f) => f.endsWith(".json")).sort();
 const groups = new Map();
+const unreadable = [];
 let totalCards = 0;
 
 for (const file of files) {
@@ -21,9 +22,13 @@ for (const file of files) {
     const raw = fs.readFileSync(filePath, "utf8");
     state = JSON.parse(raw);
   } catch {
+    unreadable.push(file);
     continue;
   }
-  if (!state || typeof state !== "object") continue;
+  if (!state || typeof state !== "object") {
+    unreadable.push(file);
+    continue;
+  }
 
   const executor = state.executor || "unknown";
   const risk = state.risk || "unknown";
@@ -99,4 +104,8 @@ for (const key of sortedKeys) {
 }
 
 console.log(`total cards ${totalCards}`);
+// A state file that doesn't parse is missing from every number above: say so, don't let the totals look complete.
+if (unreadable.length > 0) {
+  console.log(`skipped unreadable state files: ${unreadable.length} (${unreadable.join(", ")})`);
+}
 process.exit(0);

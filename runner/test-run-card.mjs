@@ -1807,11 +1807,69 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 43) {
-    console.log("43/43 passed");
+  // Case stats-unreadable: a state file that doesn't parse is named in the output, not dropped silently.
+  {
+    const badLive = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-stats-bad-")).replaceAll("\\", "/");
+    const badDir = path.join(badLive, "orch-runner");
+    fs.mkdirSync(badDir, { recursive: true });
+    fs.writeFileSync(path.join(badDir, "good-1.json"), JSON.stringify({ executor: "agy", risk: "low", outcome: "passed_no_review", fixes: [], rounds: [] }), "utf8");
+    fs.writeFileSync(path.join(badDir, "bad-1.json"), "{not json", "utf8");
+    const resBad = spawnSync(process.execPath, [statsScript], {
+      env: { ...process.env, ORCH_RUNNER_LIVE_DIR: badLive },
+      encoding: "utf8"
+    });
+    assert.strictEqual(resBad.status, 0, resBad.stderr);
+    assert.ok(resBad.stdout.includes("total cards 1"), `stdout should count the readable card, got: ${resBad.stdout}`);
+    assert.ok(resBad.stdout.includes("skipped unreadable state files: 1 (bad-1.json)"), `stdout should name the skipped file, got: ${resBad.stdout}`);
+    fs.rmSync(badLive, { recursive: true, force: true });
+    passedCount++;
+  }
+
+  // Case ledger-warn: an unreadable line and a stream with no usage go to stderr; --json stdout stays parseable.
+  {
+    fs.writeFileSync(path.join(tempLive, "codex-case-warn.jsonl"), [
+      "not json at all",
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1000, cached_input_tokens: 400, output_tokens: 50 } })
+    ].join("\n"), "utf8");
+    fs.writeFileSync(path.join(tempLive, "codex-review-case-warn.jsonl"), JSON.stringify({ type: "thread.started" }) + "\n", "utf8");
+    const resWarn = spawnSync(process.execPath, [ledgerScript, "case-warn", "--json"], {
+      env: { ...baseEnv, ORCH_RUNNER_LIVE_DIR: tempLive },
+      encoding: "utf8"
+    });
+    assert.strictEqual(resWarn.status, 0, resWarn.stderr);
+    const parsedWarn = JSON.parse(resWarn.stdout.trim());
+    assert.strictEqual(parsedWarn.length, 2);
+    assert.ok(resWarn.stderr.includes("codex-case-warn.jsonl: 1 unreadable line(s) skipped"), `stderr should count the bad line, got: ${resWarn.stderr}`);
+    assert.ok(resWarn.stderr.includes("codex-review-case-warn.jsonl: no token usage found"), `stderr should flag the usage-less stream, got: ${resWarn.stderr}`);
+    passedCount++;
+  }
+
+  // Case bg-warn: a Check that already passes before the change gets a WARNING; `## Expect` green (a refactor) does not.
+  {
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "low");
+    const envBg = { ...baseEnv, ORCH_RUNNER_FAKE_EXEC: "echo 4 > a.txt; echo 'STATUS: done'" };
+    delete envBg.ORCH_RUNNER_FAKE_REVIEW;
+    const resBg = runCard("case-bg-warn", { env: envBg });
+    assert.strictEqual(resBg.status, 0, resBg.stderr);
+    assert.strictEqual(readState("case-bg-warn").baselineCheck.greenBefore, true);
+    assert.ok(resBg.stdout.includes("WARNING: the Check already passes before the change"), `stdout should warn, got: ${resBg.stdout}`);
+
+    resetRepo();
+    writeCard('node -e "process.exit(0)"', "low");
+    fs.appendFileSync(cardPath, "\n## Expect\ngreen\n", "utf8");
+    const resBgOk = runCard("case-bg-expect", { env: envBg });
+    assert.strictEqual(resBgOk.status, 0, resBgOk.stderr);
+    assert.strictEqual(readState("case-bg-expect").baselineCheck.greenBefore, false);
+    assert.ok(!resBgOk.stdout.includes("WARNING"), `a green Expect card should not warn, got: ${resBgOk.stdout}`);
+    passedCount++;
+  }
+
+  if (passedCount === 46) {
+    console.log("46/46 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/43 passed`);
+    console.error(`Only ${passedCount}/46 passed`);
     process.exitCode = 1;
   }
 } finally {

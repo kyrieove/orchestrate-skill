@@ -23,10 +23,13 @@ for (const f of files) {
   let model = "", fresh = 0, cached = 0, out = 0;
   let stepFresh = 0, stepCached = 0, stepOut = 0, hasStepUsage = false;
   let resultFresh = 0, resultCached = 0, resultOut = 0;
+  let badLines = 0, nonEmpty = 0;
   for (const line of readFileSync(`${dir}/${f}`, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    nonEmpty++;
     let e;
-    try { e = JSON.parse(line); } catch { continue; }
-    if (!e || typeof e !== "object") continue;
+    try { e = JSON.parse(line); } catch { badLines++; continue; }
+    if (!e || typeof e !== "object") { badLines++; continue; }
     model = e.init?.model ?? (typeof e.model === "string" ? e.model : model);
     if (f.startsWith("agy-")) {
       const u = e.step_update?.usage ?? e.usage ?? e.step?.usage;
@@ -64,6 +67,9 @@ for (const f of files) {
       fresh = resultFresh; cached = resultCached; out = resultOut;
     }
   }
+  // Warnings go to stderr so --json output stays parseable.
+  if (badLines > 0) console.error(`warning: ${f}: ${badLines} unreadable line(s) skipped`);
+  if (nonEmpty > 0 && fresh + cached + out === 0) console.error(`warning: ${f}: no token usage found (the format may have changed, or the run stopped before it finished)`);
   const role = f.startsWith("codex-review-") ? "review" : f.startsWith("codex-plan-") ? "plan" : "exec";
   const m = model || f.split("-")[0];
   if (isJson) {
