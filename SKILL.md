@@ -5,13 +5,13 @@ description: Claude plans and accepts; agy or codex executes a detailed task car
 
 # orchestrate — Claude is the brain, agy and codex are the hands
 
+Dates, incidents and measured costs behind these rules: [LESSONS.md](LESSONS.md).
+
 **Why this shape.** Executors following explicit steps are fast and cheap. Executors *figuring things
 out* — reading large files, designing, re-running whole test suites, reworking after strict reviews —
-cost tens of times more (measured 2026-10-01: a goal-only agy card burned 2.2 M fresh + 18 M cached
-input tokens). So design stays with Claude and the card says exactly what to do.
+cost tens of times more. So design stays with Claude and the card says exactly what to do.
 
-**Who writes.** Dispatch costs Claude 3–5k output tokens (card, dispatch, acceptance; measured 2026-10-04 on a
-1-line edit). Claude writes directly when that is cheaper and needs no design hand-off: small edits, and
+**Who writes.** Dispatch costs Claude 3–5k output tokens (card, dispatch, acceptance). Claude writes directly when that is cheaper and needs no design hand-off: small edits, and
 self-contained helpers it can write in one go (e.g. the 25-line `ledger.mjs`). Anything coupled to existing code,
 long, or needing a test loop is dispatched. Not in fixed modes (`/agy`, `/luna`, `/sol`) or when the user asked
 Claude not to implement. The user sends other small jobs to `/son5`.
@@ -26,11 +26,10 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 | `/sol` | codex `gpt-6.1-sol` | fixed |
 | `/wb` | CodeBuddy CLI (WorkBuddy account) `deepseek-v4.1-flash` high | fixed |
 
-**Code worker** (user, 2026-10-05): before the first code card of every `/orch` task ask "写代码交给 agy 还是 wb？";
-the user rated wb above agy after 4 cards. Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its
-misses (2026-10-04: sol spent 4.5 M tokens executing the Cartool port, against 0.2–0.3 M for a typical agy card).
+**Code worker** (user): before the first code card of every `/orch` task ask "写代码交给 agy 还是 wb？";
+Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its misses.
 
-**wb is agy's fallback, never a reviewer** (user 2026-10-06). Switch `~/.claude/skills/orchestrate/agy-fallback`:
+**wb is agy's fallback, never a reviewer** (user). Switch `~/.claude/skills/orchestrate/agy-fallback`:
 `auto` (default, also when missing) → at dispatch the runner checks the antigravity quota and runs an agy card on wb
 (`deepseek-v4.1-flash`) only while its 5h or 7d window is full; the summary's `executor:` line says `→ wb` when it fell
 back. `on` → agy cards always on wb; `off` → always agy. Write it only when the user says so in chat, and say which it
@@ -40,7 +39,7 @@ Always flash, never another DeepSeek model (user).
 Natural language: naming one executor ("让 / 交给 / 只让 agy|luna|sol|wb 干") → that fixed mode; "交给 codex"
 without a model → `/orch`, choosing luna; plain 派活 / 分工 / 编排 → `/orch`. A slash
 command beats wording inside its arguments (say so in one line if they conflict). Empty arguments → the
-task in progress; none → ask in one line. luna and sol need no permission prompt (user, 2026-10-01); any
+task in progress; none → ask in one line. luna and sol need no permission prompt (user); any
 other codex model → ask, stating the concrete job. agy's model is fixed.
 
 **Executor fails** (agy 429 / RESOURCE_EXHAUSTED / quota text, codex unreachable):
@@ -52,8 +51,7 @@ the runner ends `review_pending` (no wb, no Claude substitute). The reviewer tie
 executors, high risk or `--reviewer sol`; `--reviewer luna` cannot lower it (summary says `floor sol`). On `review_pending`: do not replace the conformance review with a Claude line-by-line read. Accept
 provisionally as `review pending` (in `## Acceptance` and the project log), and run the codex review when
 quota returns. High risk: may be committed but marked `unreviewed`; its numbers don't go into the paper
-until the review passes. (2026-10-01: Claude's line-by-line review passed a card; the later sol review found 2 real
-bugs in it.)
+until the review passes.
 
 ## Review — tiered by risk, same in every mode
 
@@ -62,17 +60,16 @@ Three layers:
    syntax self-check on what it changed; manual fallback: the executor runs the Check). Always.
 2. **Conformance review** — diff against the card (steps followed, no files outside the card, no copied
    code, no junk files). Done by a read-only codex session, never by Claude:
-   medium risk → `gpt-6-luna`, high risk → `gpt-6.1-sol` (checking a diff against a card needs no top model; 2026-10-04
-   user decision to spare sol quota). When luna executed, sol reviews at medium and high; when sol executed, a *fresh*
+   medium risk → `gpt-6-luna`, high risk → `gpt-6.1-sol` (checking a diff against a card needs no top model). When luna executed, sol reviews at medium and high; when sol executed, a *fresh*
    `gpt-6.1-sol` session.
    Code that later runs depend on (shared tooling, the runner, common modules) takes the high-tier reviewer (sol) even at
-   medium risk: on the runner (2026-10-05) luna found 0–1 issues per card, sol 5, and later audits 11 more.
+   medium risk: luna's reviews of shared code missed issues that sol found.
    **Audit**: after 4–5 accepted cards on the same module, run a read-only whole-repo sol audit (`/rv` 整体) and backfill
    each real finding into the K missed of the card that introduced it — a diff review never sees cross-card design bugs.
 3. **Acceptance** — Claude only. Reads `review.md`, `git diff --stat`, the flagged hunks (`file:line`
    from the review) and the product (open the figure, run the CLI, read the numbers). Not the full diff.
 
-**When a review is done** (user, 2026-10-11; an LLM review finds something new every round, so "no findings" is
+**When a review is done** (user; an LLM review finds something new every round, so "no findings" is
 never the stop signal). Every finding carries [P0]–[P3] and a code line that confirms it. Only P0/P1 (changes
 behaviour, a result or a Parameters value, breaks the Goal or Check) block acceptance; P2/P3 go into Acceptance as
 `deferred:` and are not fixed in this card. At most two review rounds per card: the first review, then one look at the
@@ -90,12 +87,9 @@ override it.
 
 Lookup / literature / extraction tasks (any executor or subagent) usually produce no diff: skip layer 2;
 in layer 3 every claim the user's decision hinges on — usually 1–2 — Claude verifies once at the primary source (source code, PDF page) before it
-goes into a log or the paper. (2026-10-04: a subagent reported Cartool's derivative criteria had no
-source; the Cartool repo has them.)
+goes into a log or the paper.
 
-Why the high tier: 2026-09-24 agy passed all 5 self-checks, but an lme4 Gamma-identity GLMM
-underestimated the RT standard error ~5× and produced a false positive. Neither a self-check nor a
-conformance review catches a wrong number; only an independent recompute does.
+Why the high tier: a self-check or a conformance review cannot catch a wrong number; only an independent recompute does.
 
 ## Flow
 
@@ -120,7 +114,7 @@ conformance review catches a wrong number; only an independent recompute does.
    **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
    run in the background with `node ~/.claude/skills/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`
    (refuses an existing output dir unless `--resume`; default timeout 110 min; split longer runs into resumable parts;
-   a waiting executor re-reads its context on every poll — agy on v16, 2026-10-04: ~6.4 M fresh + 17.7 M cached in its first run).
+   a waiting executor re-reads its context on every poll).
 4. **Read the summary** (its first line is `ORCH-RUNNER <name> outcome=<outcome>`):
 
    | outcome | next |
@@ -139,10 +133,9 @@ conformance review catches a wrong number; only an independent recompute does.
    declaration): Claude fixes it directly — except in fixed modes or when the user asked Claude not to implement
    (same rule as **Who writes**) — runs `node ~/.claude/skills/orchestrate/runner/run-card.mjs --recheck --name <name>` (the card's Check on
    the current tree; `--commit` refuses files changed since the last Check, or a last Check that failed), and adds a
-   `- claude fix: <what>` line to Acceptance (`--commit` needs it to accept a `review_fail` / `check_failed` run) — an executor fix round costs
-   ~0.3 M fresh + 3 M cached tokens (2026-10-05). Anything larger: append `## Fix N` to the card (exact steps), then
+   `- claude fix: <what>` line to Acceptance (`--commit` needs it to accept a `review_fail` / `check_failed` run) — an executor fix round is small. Anything larger: append `## Fix N` to the card (exact steps), then
    `node ~/.claude/skills/orchestrate/runner/run-card.mjs --fix N --fresh --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
-   It runs the executor (`--fresh`: a new agy session — 2026-10-05 a fresh Fix 1 cost 103k fresh tokens, a continued one 799k; drop it to continue),
+   It runs the executor (`--fresh`: a new agy session; drop it to continue),
    read-only guard, files check and Check, no second conformance review; the summary carries the fix diff, which is
    all Claude reads. High risk: recompute the key number again. Max 2 fixes, then a new card in `<task>-v2/`.
 6. **Accept.** Turn `## Acceptance (draft)` into `## Acceptance`: replace the `TODO`s (verdict: accepted / review
@@ -153,7 +146,7 @@ conformance review catches a wrong number; only an independent recompute does.
    hash; **don't push**. Commit messages end with the attribution lines the session asks for.
    When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
    with where it was found and the fix commit, then commit the card. After 10–15 cards, change the Modes table from
-   `node ~/.claude/skills/orchestrate/runner/stats.mjs` and the Acceptance rows, not from impressions (user, 2026-10-04).
+   `node ~/.claude/skills/orchestrate/runner/stats.mjs` and the Acceptance rows, not from impressions (user).
    Analysis logs follow the project's CLAUDE.md rules.
 
 ## Card sections (`card.md`)
@@ -171,9 +164,7 @@ conformance review catches a wrong number; only an independent recompute does.
 ## Steps (N = k)  numbered 1..N, the total in the heading; per step: file → function → the exact behaviour change; code snippets
                for anything fiddly (index math, time axes, regexes, API calls the executor may get wrong)
                When a step adds a check or invariant, list every path that can bypass it (cache hit, early
-               return, fallback, retry) and say how each one is covered. (2026-10-01: 2 of 6 cards failed
-               review because a cache hit returned before the new check.)
-## Check       one command in backticks (or a fenced block), the fastest existing test that proves the goal; add ONE small new test
+               return, fallback, retry) and say how each one is covered.## Check       one command in backticks (or a fenced block), the fastest existing test that proves the goal; add ONE small new test
                only for a bug with a crisp repro, and spell it out here
 ## Expect      optional. `green` = a refactor: the Check is meant to pass before the change too (no baseline WARNING).
                Otherwise the runner prints WARNING when the Check already passes before the change: add a test that fails on the old code.
@@ -194,7 +185,7 @@ When the task reads raw data or writes results into an untracked folder, the car
   reuses it only after the script checks its own saved run parameters (e.g. `run_params.json`) match;
 - temp files, logs and results all stay in the output directory;
 - compare the raw-file list, sizes and mtimes before and after; any difference = failure, stop;
-- **checkpoint / resume** (user's hard requirement, 2026-09-24): any script expected to run > 10 min
+- **checkpoint / resume** (user's hard requirement): any script expected to run > 10 min
   saves results in batches, skips finished batches on restart, skips if the final output exists; each
   batch's seed depends only on its batch number so a resumed run is bit-identical to an uninterrupted
   one; prove it with a small trial (run straight through vs stop once and resume). Batch size: an
@@ -211,7 +202,7 @@ Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
    user — the executor must not overwrite them.
 4. **Execute** (background, no heartbeat; commands below). **Long runs (> 10 min of computing):** the executor
    writes the script and runs the pilot only; Claude starts the full run as a background Bash job (0 tokens while it
-   computes; a waiting executor re-reads its context on every poll — agy on v16, 2026-10-04: ~6.4 M fresh + 17.7 M cached in its first run).
+   computes; a waiting executor re-reads its context on every poll).
    Command (literal paths, so the lane `脚本 <name>` shows; the `.exit` file turns it done/failed):
    `python <script> 2>&1 | tee ~/.claude/agent-live/run-<name>.jsonl; echo ${PIPESTATUS[0]} > ~/.claude/agent-live/run-<name>.exit`
    — the script appends `k/N 已完成：… · 正在：…` to `~/.claude/agent-live/run-<name>.progress` after each checkpoint.
@@ -234,7 +225,7 @@ Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
    - `review findings:` N real / M false positive / K missed (a bug found later by Claude or a later review), with tier and reviewer.
      When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
      with where it was found and the fix commit, then commit the card. Long runs get the same two lines (the run itself adds no executor row).
-   After 10–15 cards, change the Modes table from these rows, not from impressions (user, 2026-10-04).
+   After 10–15 cards, change the Modes table from these rows, not from impressions (user).
    If the project keeps a code log (e.g. `docs/review-log.md`), add one line pointing at the card. Analysis logs follow the
    project's CLAUDE.md rules.
 
@@ -245,7 +236,7 @@ commands). Only at a card's first dispatch, clear same-name leftovers:
 `rm -f ~/.claude/agent-live/{agy,codex,codex-review,run}-<name>.{jsonl,progress,exit}` — later dispatches (review,
 fixes) must not, or the ledger loses the earlier rows; a re-run of the same role first saves its ledger row.
 
-Progress line — append to every executor instruction: "after starting, append `0/N 已完成：无 · 正在：<第1步>`, and after finishing each step append `k/N 已完成：X · 正在：Y` (Chinese; Y says in plain words what is being done now and how far along it is, 30–50 characters, no function names needed, e.g. `2/5 已完成：读 README · 正在：给 README 加额度说明，开头两段已写好，还差示例和截图`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to <abs ~/.claude/agent-live/<agy|codex>-<name>.progress>. Just append; do not open, list or inspect that directory or any other file to learn the format." The last sentence matters: in the 2026-10-04 test agy spent most of 165k input + 479k cached tokens exploring `agent-live/` for a 1-line edit. The token-weather mod shows it as the lane progress bar, only in the session whose Bash command spells out the `agent-live/<name>.jsonl` path literally (no shell variables in the name). The lane crops the line's end on a narrow screen, so keep X short and put any changing count first in Y (`正在：T-AAHC交叉验证 76/100（k-means 已完）`, not `正在：交叉验证 k-means 72/72 · T-AAHC 76/100`): on 2026-10-04 the count sat at the end, was cropped, and the lane looked frozen. A sub-step counter Claude writes itself (a silent background loop appending to the same `.progress`) follows the same rule.
+Progress line — append to every executor instruction: "after starting, append `0/N 已完成：无 · 正在：<第1步>`, and after finishing each step append `k/N 已完成：X · 正在：Y` (Chinese; Y says in plain words what is being done now and how far along it is, 30–50 characters, no function names needed, e.g. `2/5 已完成：读 README · 正在：给 README 加额度说明，开头两段已写好，还差示例和截图`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to <abs ~/.claude/agent-live/<agy|codex>-<name>.progress>. Just append; do not open, list or inspect that directory or any other file to learn the format." The last sentence matters: without it, agy explores `agent-live/` for a 1-line edit. The token-weather mod shows it as the lane progress bar, only in the session whose Bash command spells out the `agent-live/<name>.jsonl` path literally (no shell variables in the name). The lane crops the line's end on a narrow screen, so keep X short and put any changing count first in Y (`正在：T-AAHC交叉验证 76/100（k-means 已完）`, not `正在：交叉验证 k-means 72/72 · T-AAHC 76/100`): a count at the end gets cropped and the lane looks frozen. A sub-step counter Claude writes itself (a silent background loop appending to the same `.progress`) follows the same rule.
 
 **agy** (model fixed; `-p` ignores stdin, so it reads the card from disk):
 
@@ -265,7 +256,7 @@ whole file. If the last line is not a result (crash, killed), read the last few 
 ```
 
 (no `-s` with `--approve-for-me`; outside git add `--skip-git-repo-check`, review against the file snapshot, and write
-`commit: n/a` in Acceptance). `< /dev/null` is required: with stdin left open codex prints "Reading additional input from stdin..." and hangs (2026-10-04). The first line names the lane (`GPT-6 Luna` / `GPT-6.1 Sol`).
+`commit: n/a` in Acceptance). `< /dev/null` is required: with stdin left open codex prints "Reading additional input from stdin..." and hangs. The first line names the lane (`GPT-6 Luna` / `GPT-6.1 Sol`).
 
 **codex conformance review** (read-only; `<reviewer>`: luna or sol executed → `gpt-6.1-sol` (fresh session); otherwise
 `gpt-6-luna` for medium risk, `gpt-6.1-sol` for high):
@@ -278,7 +269,7 @@ whole file. If the last line is not a result (crash, killed), read the last few 
 `codebuddy` in place of `codex exec` — exec: `{ echo '{"model":"deepseek-v4.1-flash"}'; codebuddy -p "<same prompt>" --model deepseek-v4.1-flash --effort high -y --output-format stream-json < /dev/null; } > ~/.claude/agent-live/codex-<name>.jsonl 2>&1`.
 The reply is the `result` field of the last `{"type":"result"}` line.
 
-Fill `<paths from the before snapshot>` from step 3 (2026-10-04: without it sol failed a card for the user's own earlier edits). Run the review in the background too.
+Fill `<paths from the before snapshot>` from step 3 (without it, sol counts the user's own earlier edits against the card). Run the review in the background too.
 
 **Background, no heartbeat.** Run the executor (and the review) with `run_in_background` and
 `timeout` 7200000, cwd = repo. Do **not** arm a Monitor heartbeat: every event wakes Claude for a full turn,

@@ -9,7 +9,8 @@ Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.cla
 - 基线与解析报数（测试 46/46 passed）：
   1. 基线 Check 一开始就通过 → 摘要打 `WARNING`（`baselineCheck.greenBefore`）。卡片写 `## Expect` 的 `green` 表示重构，不警告。
   2. `runner/stats.mjs` 打印 `skipped unreadable state files`；`ledger.mjs` 打印坏行数，以及“有内容但找不到 token 用量”的警告（走 stderr，`--json` 不受影响）。
-- `card-template.md` 已补 `## Expect`（已提交）。`SKILL.md` 的 `## Expect` 说明已写进工作区但未提交：该文件有别人未提交的改动（P0/P1 审查规则、plan 审查路径），要和那批改动一起提交。
+- 提交链：`679772b`（runner 基线 WARNING、解析报数）→ `2765e59`（card-template 的 `## Expect`）→ `39d8a17`（SKILL.md 的 P0–P3 审查规则、codex-plan 流、`## Expect`）→ 本次（证据挪到 `LESSONS.md`）。
+- 规则和证据分开了：规则在 `SKILL.md`，每条规则的日期、事故、实测数字在 `LESSONS.md`，两边的段落一一对应。SKILL.md 里不再有日期，`(user)` 标注保留。改规则时两边都要看。
 - 已知：Expect green 的卡，`greenBefore` 是 false（字段名和实际含义不完全一致，见 `runner/run-card.mjs` 那段注释）。
 
 ## 2026-10-08
