@@ -420,6 +420,13 @@ if (!isFix && !recon && check) {
     touched: baseTouched,
     greenBefore: baseRes.exit === 0 && !baseRes.timedOut && !expectGreen
   };
+  // 126/127 = the Check's command or interpreter is missing: the card is wrong, so no executor run can turn it green.
+  if (baseRes.exit === 126 || baseRes.exit === 127) {
+    state.outcome = "check_broken";
+    save(state);
+    console.error(`STOP: the card's Check cannot run (exit ${baseRes.exit}: command or interpreter not found). Fix ## Check; no executor was started. Log: ${baselineLog}`);
+    process.exit(2);
+  }
   save(state);
 }
 

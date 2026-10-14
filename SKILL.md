@@ -29,7 +29,7 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 **Code worker** (user): before the first code card of every `/orch` task ask "写代码交给 agy 还是 wb？";
 Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its misses.
 
-**wb is agy's fallback, never a reviewer** (user). Switch `~/.claude/skills/orchestrate/agy-fallback`:
+**wb is agy's fallback, never a reviewer** (user). Switch `D:/2/dev/orch-runner/orchestrate/agy-fallback`:
 `auto` (default, also when missing) → at dispatch the runner checks the antigravity quota and runs an agy card on wb
 (`deepseek-v4.1-flash`) only while its 5h or 7d window is full; the summary's `executor:` line says `→ wb` when it fell
 back. `on` → agy cards always on wb; `off` → always agy. Write it only when the user says so in chat, and say which it
@@ -96,12 +96,12 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
 1. **Read just enough.** `grep -n` / `sed -n 'a,bp'` on the code the change touches. For a large
    unfamiliar area, first send a read-only recon card ("summarise X: functions, call sites, data
    flow, ≤ 40 lines", dispatched with `--recon`) and plan from its summary.
-2. **Write the card** — `docs/orch/<yyyy-mm-dd>-<name>/card.md` in the project (sections below). Start from `~/.claude/skills/orchestrate/card-template.md`.
+2. **Write the card** — `docs/orch/<yyyy-mm-dd>-<name>/card.md` in the project (sections below). Start from `D:/2/dev/orch-runner/orchestrate/card-template.md`.
    One task per card. Show the user the card before dispatching when it writes to data folders or
    does anything irreversible; otherwise dispatch.
 3. **Dispatch through the runner** — one background Bash (`run_in_background`, `timeout` 7200000, cwd = repo), no heartbeat:
    ```bash
-   node ~/.claude/skills/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl agent-live/codex-plan-<name>.jsonl
+   node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl agent-live/codex-plan-<name>.jsonl
    ```
    Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
    command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` → codex quota full for a luna/sol executor or a high-risk card: tell the user), snapshots git status + content
@@ -112,7 +112,7 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    change is out of scope. `--exec-check`: the executor runs the card's Check itself (up to 3 attempts) before replying; the runner still re-runs it as the evidence. Recommended when the Check finishes in under 2 minutes; kept in the state file for `--fix N`. `--timeout-min` (default 100, the Bash job dies at 120). `--reviewer sol`: shared tooling at medium risk (Review layer 2). Not a git repo: works on a
    size/mtime snapshot; `--commit` refuses. State: `~/.claude/agent-live/orch-runner/<name>.json`.
    **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
-   run in the background with `node ~/.claude/skills/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`
+   run in the background with `node D:/2/dev/orch-runner/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`
    (refuses an existing output dir unless `--resume`; default timeout 110 min; split longer runs into resumable parts;
    a waiting executor re-reads its context on every poll).
 4. **Read the summary** (its first line is `ORCH-RUNNER <name> outcome=<outcome>`):
@@ -131,22 +131,22 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    | `review_error` | read the tail of `codex-review-<name>.jsonl`: anything else (bad config, no VERDICT twice) → fix the cause and re-run the review — no provisional acceptance |
 5. **Fix.** A real finding whose fix is a few mechanical lines (a missing check, a wrong regex, a duplicate
    declaration): Claude fixes it directly — except in fixed modes or when the user asked Claude not to implement
-   (same rule as **Who writes**) — runs `node ~/.claude/skills/orchestrate/runner/run-card.mjs --recheck --name <name>` (the card's Check on
+   (same rule as **Who writes**) — runs `node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --recheck --name <name>` (the card's Check on
    the current tree; `--commit` refuses files changed since the last Check, or a last Check that failed), and adds a
    `- claude fix: <what>` line to Acceptance (`--commit` needs it to accept a `review_fail` / `check_failed` run) — an executor fix round is small. Anything larger: append `## Fix N` to the card (exact steps), then
-   `node ~/.claude/skills/orchestrate/runner/run-card.mjs --fix N --fresh --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
+   `node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --fix N --fresh --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
    It runs the executor (`--fresh`: a new agy session; drop it to continue),
    read-only guard, files check and Check, no second conformance review; the summary carries the fix diff, which is
    all Claude reads. High risk: recompute the key number again. Max 2 fixes, then a new card in `<task>-v2/`.
 6. **Accept.** Turn `## Acceptance (draft)` into `## Acceptance`: replace the `TODO`s (verdict: accepted / review
    pending / rejected; `review findings: N real / M false positive / K missed`, with tier and reviewer; recompute result
    for high risk); the files, Check and `tokens:` lines are already filled in. Then
-   `node ~/.claude/skills/orchestrate/runner/run-card.mjs --commit --name <name> --message "<msg>"` — it stages only the
+   `node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --commit --name <name> --message "<msg>"` — it stages only the
    card's files + card.md + review.md + reply.md (and appends to `docs/review-log.md` when the project has one), commits, prints the
    hash; **don't push**. Commit messages end with the attribution lines the session asks for.
    When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
    with where it was found and the fix commit, then commit the card. After 10–15 cards, change the Modes table from
-   `node ~/.claude/skills/orchestrate/runner/stats.mjs` and the Acceptance rows, not from impressions (user).
+   `node D:/2/dev/orch-runner/orchestrate/runner/stats.mjs` and the Acceptance rows, not from impressions (user).
    Analysis logs follow the project's CLAUDE.md rules.
 
 ## Card sections (`card.md`)
@@ -220,7 +220,7 @@ Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
    first-line VERDICT counts as FAIL: re-run the review once.
 8. **Accept.** Append `## Acceptance` to the card (verdict: accepted / review pending / rejected, files, check result, recompute result for
    high risk, commit hash, and two ledger lines below), commit code + card + review, **don't push**.
-   - `tokens:` the output of `node ~/.claude/skills/orchestrate/ledger.mjs <name>` (one row per executor and reviewer run),
+   - `tokens:` the output of `node D:/2/dev/orch-runner/orchestrate/ledger.mjs <name>` (one row per executor and reviewer run),
      taken before any same-name dispatch clears the streams; fix rounds add their own row.
    - `review findings:` N real / M false positive / K missed (a bug found later by Claude or a later review), with tier and reviewer.
      When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
@@ -284,5 +284,5 @@ where relevant.
 
 - codex's sandbox can't write `~/.mne`: for MNE code put `_MNE_FAKE_HOME_DIR=<temp dir>` in the check.
 - Don't run agy inside codex (no sign-in there) or vice versa.
-- Cost check: `node ~/.claude/skills/orchestrate/cost.mjs <transcript.jsonl>`.
+- Cost check: `node D:/2/dev/orch-runner/orchestrate/cost.mjs <transcript.jsonl>`.
 - Source locations: this skill is a symlink to `D:/2/dev/orch-runner/orchestrate`; the live token-weather mod is `D:/2/dev/token-weather-quotas/hooks/token-weather.mjs` (the `~/.claude/plugins/cache/.../token-weather` copy is the old, disabled one).

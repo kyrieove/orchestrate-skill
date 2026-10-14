@@ -63,7 +63,9 @@ export function snapshot(repoAbs, isGit) {
   }
   const hashes = new Map();
   if (existing.length > 0) {
-    const hashRes = spawnSync("git", ["-C", repoAbs, "hash-object", "--", ...existing], {
+    // stdin, not argv: a long dirty list overflows the Windows command line
+    const hashRes = spawnSync("git", ["-C", repoAbs, "hash-object", "--stdin-paths"], {
+      input: existing.join("\n") + "\n",
       encoding: "utf8",
       maxBuffer: 50 * 1024 * 1024
     });

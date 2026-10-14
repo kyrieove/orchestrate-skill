@@ -9,7 +9,7 @@ export const wbCmd = (prompt, extra = "") => `codebuddy -p ${q(prompt)} --model 
 
 // "on": agy cards run on wb; "off": always agy; anything else or missing = "auto":
 // wb only while antigravity's quota is full, checked once at dispatch.
-export const AGY_FALLBACK_FILE = process.env.ORCH_AGY_FALLBACK_FILE || "C:/Users/ASUS/.claude/skills/orchestrate/agy-fallback";
+export const AGY_FALLBACK_FILE = process.env.ORCH_AGY_FALLBACK_FILE || "D:/2/dev/orch-runner/orchestrate/agy-fallback";
 export function agyMode() {
   let mode = "auto";
   try { mode = fs.readFileSync(AGY_FALLBACK_FILE, "utf8").trim(); } catch {}

@@ -183,6 +183,21 @@ No rm, no git push
     passedCount++;
   }
 
+  // Case C2: Check's interpreter is missing (exit 127) → check_broken, exit 2, executor never runs.
+  {
+    resetRepo();
+    writeCard("no-such-interpreter-xyz a.txt");
+    const envC2 = { ...baseEnv, ORCH_RUNNER_FAKE_EXEC: "echo ran > exec-ran.txt; echo 'STATUS: done'" };
+
+    const res = runCard("case-c2", { env: envC2 });
+
+    assert.strictEqual(res.status, 2, `Case C2 exit status was ${res.status}: ${res.stderr}`);
+    assert.match(res.stderr, /Check cannot run \(exit 127/);
+    assert.strictEqual(readState("case-c2").outcome, "check_broken");
+    assert.ok(!fs.existsSync(path.join(tempRepo, "exec-ran.txt")), "executor must not run");
+    passedCount++;
+  }
+
   // Case D: fake exec echo 'STATUS: blocked' (exit 0) → blocked, Check not run.
   {
     resetRepo();
@@ -1865,11 +1880,11 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 46) {
-    console.log("46/46 passed");
+  if (passedCount === 47) {
+    console.log("47/47 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/46 passed`);
+    console.error(`Only ${passedCount}/47 passed`);
     process.exitCode = 1;
   }
 } finally {
