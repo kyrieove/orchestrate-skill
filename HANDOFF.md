@@ -4,7 +4,15 @@
 Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.claude` 里面的路径每次编辑都要确认）。
 旧副本备份在 `~/.claude/_archive/2026-10-05/orchestrate`。
 
-## 2026-10-12（最新，新会话先读）
+## 2026-10-16（最新，新会话先读）
+
+- 测试 49/49 passed。提交：`001a6b0`（runBash 改用脚本文件、concurrent 路径、commit 拒绝提示）→ `2950da0`。
+- `--commit --accept accepted --findings "N real / M false positive / K missed"`：一次调用填草稿的两个 TODO 并提交；所有门槛过了才写卡片。其他内容（`claude fix:`、high 的重算结果）仍需先手改卡片。
+- `runBash` 设 `PYTHONPYCACHEPREFIX=<tmp>/orch-pycache`：隐式字节码和执行器的 `py_compile` 不再写进只读目录。
+- 9 张 `readonly_violated` 里只有 2 张含 `__pycache__`，其余是卡片范围问题（结果目录、`.cache/*.npz`），不是 runner 误报；`.cache/` 不要全局忽略。
+- 下一步候选（Gemini 建议经 Codex 审查后，见 `../orchestrate-optimization-review.html`）：审查输入预打包（需保存任务前旧内容才能出真实任务 diff）；Magpie 单模型试点。
+
+## 2026-10-12
 
 - 基线与解析报数（测试 46/46 passed）：
   1. 基线 Check 一开始就通过 → 摘要打 `WARNING`（`baselineCheck.greenBefore`）。卡片写 `## Expect` 的 `green` 表示重构，不警告。
