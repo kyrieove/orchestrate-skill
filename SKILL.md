@@ -292,4 +292,4 @@ where relevant.
 - codex's sandbox can't write `~/.mne`: for MNE code put `_MNE_FAKE_HOME_DIR=<temp dir>` in the check.
 - Don't run agy inside codex (no sign-in there) or vice versa.
 - Cost check: `node D:/2/dev/orch-runner/orchestrate/cost.mjs <transcript.jsonl>`.
-- Source locations: this skill is a symlink to `D:/2/dev/orch-runner/orchestrate`; the live token-weather mod is `D:/2/dev/token-weather-quotas/hooks/token-weather.mjs` (the `~/.claude/plugins/cache/.../token-weather` copy is the old, disabled one).
+- Source locations: every runtime's installed `orchestrate-2` is a stub (`~/.skills-manager/skills/orchestrate-2/SKILL.md`) that reads this file, so edits here take effect everywhere with no sync; the live token-weather mod is `D:/2/dev/token-weather-quotas/hooks/token-weather.mjs` (the `~/.claude/plugins/cache/.../token-weather` copy is the old, disabled one).
