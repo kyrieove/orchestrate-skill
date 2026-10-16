@@ -151,8 +151,7 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    `node D:/2/dev/orch-runner/orchestrate/runner/stats.mjs` and the Acceptance rows, not from impressions (user).
    Analysis logs follow the project's CLAUDE.md rules.
 7. **Hand over.** After step 6, if ctx_guard has reported > 250k, no background job is running, and ≥ 2 cards
-   remain: write the project's `HANDOFF.md` — state, next card N, decisions with reasons, rejected options and the
-   user's stated preferences (quote them), key paths, pitfalls — then tell the user one line:
+   remain: write the hand-over per `~/.agents/handoff-convention.md` (next step = card N), then tell the user one line:
    `/clear`, then say「读 HANDOFF.md，从第 N 张卡继续」. Do not start a new session for this: the old session
    would be woken (full context re-read) each time the new one ends a turn, and only 400 characters come back.
 
