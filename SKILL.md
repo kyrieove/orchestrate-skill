@@ -140,7 +140,9 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    all Claude reads. High risk: recompute the key number again. Max 2 fixes, then a new card in `<task>-v2/`.
 6. **Accept.** Turn `## Acceptance (draft)` into `## Acceptance`: replace the `TODO`s (verdict: accepted / review
    pending / rejected; `review findings: N real / M false positive / K missed`, with tier and reviewer; recompute result
-   for high risk); the files, Check and `tokens:` lines are already filled in. Then
+   for high risk); the files, Check and `tokens:` lines are already filled in. When the two TODOs are all that is left,
+   skip the edit: `--commit ... --accept accepted --findings "N real / M false positive / K missed"` fills them and
+   commits in one call (the card is written only if every commit gate passes). Otherwise
    `node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --commit --name <name> --message "<msg>"` — it stages only the
    card's files + card.md + review.md + reply.md (and appends to `docs/review-log.md` when the project has one), commits, prints the
    hash; **don't push**. Commit messages end with the attribution lines the session asks for.

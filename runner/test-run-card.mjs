@@ -501,14 +501,21 @@ No rm, no git push
 
     assert.ok(["review_pass", "passed_no_review", "fix_passed", "recon_done"].includes(readState("case-m").outcome),
       `case-m outcome must allow an accepted commit, got ${readState("case-m").outcome}`);
-    const cardContent = fs.readFileSync(cardPath, "utf8");
-    const withoutDraft = cardContent.replace(/##\s+Acceptance\s+\(draft\)[\s\S]*$/, "").trimEnd();
-    fs.writeFileSync(cardPath, `${withoutDraft}\n\n## Acceptance\n- verdict: accepted\n`, "utf8");
+    // --accept with malformed findings refuses and leaves the draft untouched.
+    const draftCard = fs.readFileSync(cardPath, "utf8");
+    const resOBad = runCard("case-m", { args: ["--commit", "--message", "t", "--accept", "accepted", "--findings", "none"] });
+    assert.strictEqual(resOBad.status, 2);
+    assert.strictEqual(fs.readFileSync(cardPath, "utf8"), draftCard);
 
     fs.writeFileSync(path.join(tempRepo, "z.txt"), "unrelated untracked", "utf8");
 
-    const resO2 = runCard("case-m", { args: ["--commit", "--message", "t"] });
+    // --accept fills verdict and findings in the draft and commits in the same call.
+    const resO2 = runCard("case-m", { args: ["--commit", "--message", "t", "--accept", "accepted", "--findings", "1 real / 0 false positive / 0 missed"] });
     assert.strictEqual(resO2.status, 0, `Expected exit 0 for --commit, got ${resO2.status}: ${resO2.stderr}`);
+    const acceptedCard = fs.readFileSync(cardPath, "utf8");
+    assert.ok(/^## Acceptance\r?\n- verdict: accepted$/m.test(acceptedCard), acceptedCard);
+    assert.ok(acceptedCard.includes("- review findings: 1 real / 0 false positive / 0 missed ("));
+    assert.ok(!/TODO|\(draft\)/.test(acceptedCard));
 
     const showRes = spawnSync("git", ["-C", tempRepo, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
     assert.strictEqual(showRes.status, 0);
@@ -1887,6 +1894,9 @@ No rm, no git push
     const res = await runBash(`printf %s ${q("a'b".repeat(6000))} | wc -c > ${q(out)}`, { cwd: tempRepo });
     assert.strictEqual(res.exit, 0);
     assert.strictEqual(fs.readFileSync(out, "utf8").trim(), "18000");
+    // Python bytecode is redirected out of the repo (read-only inputs stay untouched).
+    await runBash(`printf %s "$PYTHONPYCACHEPREFIX" > ${q(out)}`, { cwd: tempRepo });
+    assert.ok(fs.readFileSync(out, "utf8").includes("orch-pycache"));
     passedCount++;
   }
 

@@ -46,6 +46,8 @@ export function runBash(cmd, { cwd, timeoutMin, exitPath }) {
   fs.writeFileSync(script, cmd, "utf8");
   const child = spawn("bash", [script], {
     cwd,
+    // Bytecode (implicit, or the executor's py_compile syntax check) goes to temp, not __pycache__ next to read-only inputs.
+    env: { ...process.env, PYTHONPYCACHEPREFIX: path.join(os.tmpdir(), "orch-pycache") },
     detached: !isWin,
     stdio: "ignore"
   });

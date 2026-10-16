@@ -39,7 +39,9 @@ export function runCommit(args, ctx) {
     console.error("Card file not found:", cardAbs);
     process.exit(2);
   }
-  const cardText = fs.readFileSync(cardAbs, "utf8");
+  const draftText = fs.readFileSync(cardAbs, "utf8");
+  // --accept fills the draft in memory; the card is written only once every gate below has passed.
+  const cardText = args.accept ? fillDraft(draftText, args) : draftText;
 
   if (/^##\s+Acceptance\s+\(draft\)\s*$/im.test(cardText)) {
     console.error('Card still contains "## Acceptance (draft)": fill in verdict/review findings, then rename the heading to "## Acceptance" and rerun --commit');
@@ -123,6 +125,8 @@ export function runCommit(args, ctx) {
     }
   }
 
+  if (cardText !== draftText) fs.writeFileSync(cardAbs, cardText, "utf8");
+
   const cardDirNorm = path.resolve(path.dirname(cardAbs)).replaceAll("\\", "/");
   let taskDir = path.posix.relative(repoAbs, cardDirNorm);
   if (taskDir === "") taskDir = ".";
@@ -171,6 +175,29 @@ export function runCommit(args, ctx) {
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
   fs.renameSync(tmp, stateFile);
   process.exit(0);
+}
+
+// --accept <verdict> --findings "N real / M false positive / K missed": the two TODOs of the draft,
+// so accepting and committing is one call. Anything else in the draft stays for Claude to edit first.
+function fillDraft(text, { accept, findings }) {
+  const head = text.search(/^##\s+Acceptance\s+\(draft\)\s*$/im);
+  if (head < 0) {
+    console.error("--accept needs a ## Acceptance (draft) section in the card");
+    process.exit(2);
+  }
+  if (!["accepted", "review pending", "rejected"].includes(accept)) {
+    console.error('--accept must be "accepted", "review pending" or "rejected"');
+    process.exit(2);
+  }
+  if (typeof findings !== "string" || !/^\d+ real \/ \d+ false positive \/ \d+ missed$/.test(findings)) {
+    console.error('--findings must look like "1 real / 0 false positive / 0 missed"');
+    process.exit(2);
+  }
+  const draft = text.slice(head)
+    .replace(/^(##\s+Acceptance)\s+\(draft\)[ \t]*$/im, "$1")
+    .replace(/^- verdict: .*$/m, `- verdict: ${accept}`)
+    .replace("TODO N real / M false positive / K missed", findings);
+  return text.slice(0, head) + draft;
 }
 
 export async function runRecheck(args, { stateDir }) {
