@@ -1880,11 +1880,30 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 47) {
-    console.log("47/47 passed");
+  // runBash keeps a >8K-char command intact (Git bash truncated `bash -c` args: long review prompts exited 2).
+  {
+    const { runBash, q } = await import("./lib.mjs");
+    const out = path.join(tempLive, "long-arg.txt").replaceAll("\\", "/");
+    const res = await runBash(`printf %s ${q("a'b".repeat(6000))} | wc -c > ${q(out)}`, { cwd: tempRepo });
+    assert.strictEqual(res.exit, 0);
+    assert.strictEqual(fs.readFileSync(out, "utf8").trim(), "18000");
+    passedCount++;
+  }
+
+  // A path already flagged concurrent stays out of the scope check after the other run's claim expires.
+  {
+    const { outOfScopePaths } = await import("./card.mjs");
+    const emptyStateDir = fs.mkdtempSync(path.join(tempLive, "no-claims-"));
+    const st = { name: "self", repo: tempRepo, mayChange: ["a.txt"], concurrent: [{ path: "other.log", name: "gone" }] };
+    assert.deepStrictEqual(outOfScopePaths(["a.txt", "other.log", "stray.txt"], emptyStateDir, st), ["stray.txt"]);
+    passedCount++;
+  }
+
+  if (passedCount === 49) {
+    console.log("49/49 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/47 passed`);
+    console.error(`Only ${passedCount}/49 passed`);
     process.exitCode = 1;
   }
 } finally {

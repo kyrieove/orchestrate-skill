@@ -1,4 +1,6 @@
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 
 export const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
@@ -38,7 +40,11 @@ export function agyFallback() {
 export function runBash(cmd, { cwd, timeoutMin, exitPath }) {
   const startTime = Date.now();
   const isWin = process.platform === "win32";
-  const child = spawn("bash", ["-c", cmd], {
+  // A script file, not `bash -c`: Git bash on Windows truncates a -c argument past ~8K chars
+  // (a long review prompt then ends mid-quote and bash exits 2 before running anything).
+  const script = path.join(os.tmpdir(), `orch-runbash-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sh`);
+  fs.writeFileSync(script, cmd, "utf8");
+  const child = spawn("bash", [script], {
     cwd,
     detached: !isWin,
     stdio: "ignore"
@@ -60,6 +66,7 @@ export function runBash(cmd, { cwd, timeoutMin, exitPath }) {
   return new Promise((resolve) => {
     child.on("close", (code, signal) => {
       if (timer) clearTimeout(timer);
+      fs.rmSync(script, { force: true });
       const seconds = (Date.now() - startTime) / 1000;
       if (timedOut) {
         if (exitPath) {
@@ -76,6 +83,7 @@ export function runBash(cmd, { cwd, timeoutMin, exitPath }) {
     });
     child.on("error", (err) => {
       if (timer) clearTimeout(timer);
+      fs.rmSync(script, { force: true });
       const seconds = (Date.now() - startTime) / 1000;
       if (exitPath) {
         fs.writeFileSync(exitPath, "1\n", "utf8");

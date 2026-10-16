@@ -26,6 +26,8 @@ export function outOfScopePaths(paths, stateDir, state) {
   const claims = concurrentClaims(stateDir, state);
   return paths.filter((p) => {
     if (!state.recon && claimedPath(p, state.mayChange || [])) return false;
+    // Flagged concurrent earlier in this run: stays someone else's even after that run's claim expires.
+    if (state.concurrent?.some((c) => c.path === p)) return false;
     const claim = claims.find((c) => claimedPath(p, c.mayChange));
     if (!claim) return true;
     state.concurrent ??= [];

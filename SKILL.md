@@ -83,7 +83,7 @@ override it.
 |---|---|---|
 | low | docs, typos, figure cosmetics, ≤ 10 lines | 1 + Claude looks at `diff --stat` |
 | medium | ordinary code changes | 1 + 2 + 3 |
-| high | numbers that go into the paper, data pipeline changes | 1 + 2 + 3, and in 3 Claude **independently recomputes at least one key number from the raw data** (another method, e.g. per-subject means `lm` against the GLMM) and double-checks any too-good statistic (tiny SE, R² ≈ 1, tiny p with a small effect) |
+| high | shared pipeline code that later runs depend on, data pipeline changes. **Not one-off analysis scripts** (a sensitivity run, a single recompute, one-off data processing): those go out at **medium** even when their numbers go into the paper — no plan review, one conformance review; the numbers are protected by Claude's independent recompute in layer 3, which Claude still does (user 2026-10-14: every review round finds something new, one-off scripts are not maintained code) | 1 + 2 + 3, and in 3 Claude **independently recomputes at least one key number from the raw data** (another method, e.g. per-subject means `lm` against the GLMM) and double-checks any too-good statistic (tiny SE, R² ≈ 1, tiny p with a small effect) |
 
 Lookup / literature / extraction tasks (any executor or subagent) usually produce no diff: skip layer 2;
 in layer 3 every claim the user's decision hinges on — usually 1–2 — Claude verifies once at the primary source (source code, PDF page) before it
@@ -126,7 +126,7 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    | `readonly_violated` | 🛑 show the changed read-only paths to the user |
    | `blocked`, `failed`, `interrupted` | read the reply / stream tail; executor failures follow **Executor fails** above |
    | `review_pending` | codex quota ran out: **Reviewer out of quota** above |
-   | `plan_revise` | high risk only: sol's pre-execution plan review found a card problem (findings in the summary); nothing ran — fix the card, dispatch again |
+   | `plan_revise` | high risk only: sol's pre-execution plan review found a card problem (findings in the summary); nothing ran. First ask: is this a one-off analysis script? Then it should not have been high — fix only the P0/P1 findings and re-dispatch at medium. Otherwise fix the card and dispatch again. **A second `plan_revise` on the same card is the last round: never dispatch a third plan review** — the remaining findings go to the user |
    | `plan_error` | the plan review produced no `PLAN:` line or died: read `codex-plan-<name>.jsonl`, fix the cause, dispatch again |
    | `review_error` | read the tail of `codex-review-<name>.jsonl`: anything else (bad config, no VERDICT twice) → fix the cause and re-run the review — no provisional acceptance |
 5. **Fix.** A real finding whose fix is a few mechanical lines (a missing check, a wrong regex, a duplicate

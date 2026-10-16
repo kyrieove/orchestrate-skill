@@ -42,7 +42,7 @@ export function runCommit(args, ctx) {
   const cardText = fs.readFileSync(cardAbs, "utf8");
 
   if (/^##\s+Acceptance\s+\(draft\)\s*$/im.test(cardText)) {
-    console.error("Card still contains ## Acceptance (draft)");
+    console.error('Card still contains "## Acceptance (draft)": fill in verdict/review findings, then rename the heading to "## Acceptance" and rerun --commit');
     process.exit(2);
   }
 
@@ -81,6 +81,10 @@ export function runCommit(args, ctx) {
       reason = "rejected cards are not committed";
     } else if (verdict === "missing") {
       reason = 'no "- verdict:" line in ## Acceptance';
+    } else if (overrideLine && !scopeOverride) {
+      reason = state.recheck?.scopeOverride !== overrideLine || state.recheck.exit !== 0
+        ? `scope override needs a passing --recheck after the override line was added — run --recheck --name ${name}`
+        : `scope override needs a --review-only PASS after the last --recheck (last review: ${state.reviewOnly?.verdict ?? "none"}) — run --review-only --name ${name}`;
     }
     console.error(`commit refused: outcome=${outcome}, verdict=${verdict}: ${reason}`);
     process.exit(2);
