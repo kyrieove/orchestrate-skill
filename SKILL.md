@@ -50,8 +50,7 @@ other codex model → ask, stating the concrete job. agy's model is fixed (`anti
 - `/orch` → ask the user which other executor to use, naming the job. Claude still doesn't implement.
 
 **Reviewer out of quota.** Reviews run only on codex. Quota full when the review starts, or quota text when it dies →
-the runner ends `review_pending` (no wb, no Claude substitute). The reviewer tier is a floor: sol for luna/sol
-executors, high risk or `--reviewer sol`; `--reviewer luna` cannot lower it (summary says `floor sol`). On `review_pending`: do not replace the conformance review with a Claude line-by-line read. Accept
+the runner ends `review_pending` (no wb, no Claude substitute). The reviewer is always sol. On `review_pending`: do not replace the conformance review with a Claude line-by-line read. Accept
 provisionally as `review pending` (in `## Acceptance` and the project log), and run the codex review when
 quota returns. High risk: may be committed but marked `unreviewed`; its numbers don't go into the paper
 until the review passes.
@@ -62,11 +61,9 @@ Three layers:
 1. **Check** — the card's Check command, run by `run-card.mjs` after the executor exits (the executor only runs a
    syntax self-check on what it changed; manual fallback: the executor runs the Check). Always.
 2. **Conformance review** — diff against the card (steps followed, no files outside the card, no copied
-   code, no junk files). Done by a read-only codex session, never by Claude:
-   medium risk → `gpt-6-luna`, high risk → `gpt-6.1-sol` (checking a diff against a card needs no top model). When luna executed, sol reviews at medium and high; when sol executed, a *fresh*
-   `gpt-6.1-sol` session.
-   Code that later runs depend on (shared tooling, the runner, common modules) takes the high-tier reviewer (sol) even at
-   medium risk: luna's reviews of shared code missed issues that sol found.
+   code, no junk files). Done by a read-only codex session, never by Claude: always `gpt-6.1-sol` (sole review gate,
+   ADR-0003), medium and high risk; when sol executed, a *fresh* session. The runner hands the reviewer the list of
+   files the task changed; the reviewer does not judge file scope.
    **Audit**: after 4–5 accepted cards on the same module, run a read-only whole-repo sol audit (`/rv` 整体) and backfill
    each real finding into the K missed of the card that introduced it — a diff review never sees cross-card design bugs.
 3. **Acceptance** — Claude only. Reads `review.md`, `git diff --stat`, the flagged hunks (`file:line`
@@ -112,7 +109,7 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    risk runs a read-only sol plan review of the card (`PLAN: REVISE` stops before execution), runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
    prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
-   change is out of scope. `--exec-check`: the executor runs the card's Check itself (up to 3 attempts) before replying; the runner still re-runs it as the evidence. Recommended when the Check finishes in under 2 minutes; kept in the state file for `--fix N`. `--timeout-min` (default 100, the Bash job dies at 120). `--reviewer sol`: shared tooling at medium risk (Review layer 2). Not a git repo: works on a
+   change is out of scope. `--exec-check`: the executor runs the card's Check itself (up to 3 attempts) before replying; the runner still re-runs it as the evidence. Recommended when the Check finishes in under 2 minutes; kept in the state file for `--fix N`. `--timeout-min` (default 100, the Bash job dies at 120). Not a git repo: works on a
    size/mtime snapshot; `--commit` refuses. State: `~/.claude/agent-live/orch-runner/<name>.json`.
    **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
    run in the background with `node D:/2/dev/orch-runner/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`
@@ -266,11 +263,10 @@ whole file. If the last line is not a result (crash, killed), read the last few 
 (no `-s` with `--approve-for-me`; outside git add `--skip-git-repo-check`, review against the file snapshot, and write
 `commit: n/a` in Acceptance). `< /dev/null` is required: with stdin left open codex prints "Reading additional input from stdin..." and hangs. The first line names the lane (`GPT-6 Luna` / `GPT-6.1 Sol`).
 
-**codex conformance review** (read-only; `<reviewer>`: luna or sol executed → `gpt-6.1-sol` (fresh session); otherwise
-`gpt-6-luna` for medium risk, `gpt-6.1-sol` for high):
+**codex conformance review** (read-only; `<reviewer>` is always `gpt-6.1-sol`, fresh session):
 
 ```bash
-{ echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: <paths from the before snapshot>. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each starting with a priority tag, then file:line, the problem, the fix and the code line that confirms it (read it; drop any finding you cannot confirm in the code) — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files. Priority: [P0]/[P1] = changes behaviour, a computed result or a Parameters value, breaks the card's Goal or Check, bypasses a check, or skips a step; [P2]/[P3] = everything else. VERDICT: FAIL only when at least one [P0] or [P1] finding exists." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
+{ echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the changes against <abs card.md>. The runner found that the task changed exactly these files: <touched files>. Review only these files; file scope was already checked by the runner, so do not judge it. Run git diff for them (read untracked files the card creates); read the card and the code the changes touch. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: <paths from the before snapshot>. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. If a finding is one instance of a whole class of bug, name the class and use grep to list every occurrence. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each starting with a priority tag, then file:line, the problem, the fix and the code line that confirms it (read it; drop any finding you cannot confirm in the code) — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, copied code, junk files. Priority: [P0]/[P1] = changes behaviour, a computed result or a Parameters value, breaks the card's Goal or Check, bypasses a check, or skips a step; [P2]/[P3] = everything else. VERDICT: FAIL only when at least one [P0] or [P1] finding exists." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
 ```
 
 **wb executes** (`/wb`, or an agy card while agy's quota is full): the codex exec command with

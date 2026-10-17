@@ -1126,7 +1126,7 @@ No rm, no git push
   }
 
   // Case Y: agy-fallback "on" + --executor agy, risk medium, fake codebuddy for exec, ORCH_RUNNER_FAKE_REVIEW for review:
-  // review_pass, exactly 1 codebuddy call with --model deepseek-v4.1-flash, state.execViaWb === true, state.review.model === "gpt-6-luna".
+  // review_pass, exactly 1 codebuddy call with --model deepseek-v4.1-flash, state.execViaWb === true, state.review.model === "gpt-6.1-sol".
   {
     resetRepo();
     fs.writeFileSync(`${tempLive}/agy-fallback`, "on\n");
@@ -1142,7 +1142,7 @@ No rm, no git push
     assert.strictEqual(stateY.outcome, "review_pass");
     assert.strictEqual(stateY.exec.status, "done");
     assert.strictEqual(stateY.execViaWb, true);
-    assert.strictEqual(stateY.review.model, "gpt-6-luna");
+    assert.strictEqual(stateY.review.model, "gpt-6.1-sol");
     const reviewY = fs.readFileSync(path.join(tempRepo, "docs/orch/t/review.md"), "utf8").split(/\r?\n/)[0].trim();
     assert.strictEqual(reviewY, "VERDICT: PASS");
     const argvY = fs.readFileSync(`${fakeBin}/argv`, "utf8").trim().split("\n");
@@ -1304,8 +1304,7 @@ No rm, no git push
     passedCount++;
   }
 
-  // Case Q5 (new): risk high, --reviewer luna, fake exec + fake review PASS:
-  // state.review.model === "gpt-6.1-sol", state.review.raised === true, summary contains floor sol.
+  // Case Q5: risk high, fake exec + fake review PASS: state.review.model === "gpt-6.1-sol".
   {
     resetRepo();
     writeCard(undefined, "high");
@@ -1315,13 +1314,11 @@ No rm, no git push
       ORCH_RUNNER_FAKE_REVIEW: "printf 'VERDICT: PASS\\n' > docs/orch/t/review.md"
     };
 
-    const res5 = runCard("case-q5", { risk: "high", env: envQ5, args: ["--reviewer", "luna"] });
+    const res5 = runCard("case-q5", { risk: "high", env: envQ5, args: [] });
 
     assert.strictEqual(res5.status, 0, `Case Q5 exit status was ${res5.status}: ${res5.stderr}`);
     const stateQ5 = readState("case-q5");
     assert.strictEqual(stateQ5.review.model, "gpt-6.1-sol");
-    assert.strictEqual(stateQ5.review.raised, true);
-    assert.ok(res5.stdout.includes("floor sol"), `stdout should contain 'floor sol', got: ${res5.stdout}`);
     passedCount++;
   }
 
@@ -1777,7 +1774,7 @@ No rm, no git push
     writeCard(undefined, "medium");
     const env = { ...baseEnv, ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo c > c.txt; echo 'STATUS: done'; echo scope-review-reply",
       ORCH_RUNNER_FAKE_REVIEW: "echo 'VERDICT: PASS' > docs/orch/t/review.md" };
-    assert.strictEqual(runCard("case-scope-review", { env, risk: "medium", args: ["--reviewer", "sol"] }).status, 0);
+    assert.strictEqual(runCard("case-scope-review", { env, risk: "medium" }).status, 0);
     assert.strictEqual(readState("case-scope-review").outcome, "out_of_scope");
     fs.appendFileSync(cardPath, "\n## Acceptance\n- verdict: accepted\n- scope override: c.txt was written by another task\n", "utf8");
     assert.strictEqual(runCard("case-scope-review", { args: ["--commit", "--message", "scope test"] }).status, 2);

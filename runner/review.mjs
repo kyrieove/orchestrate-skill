@@ -19,7 +19,7 @@ export async function runReviewOnly(args, { stateDir, liveDir }) {
     fs.renameSync(`${stateFile}.tmp`, stateFile);
   };
   const taskDir = path.relative(state.repo, path.dirname(state.card)).replaceAll("\\", "/");
-  await runReview({ args: { ...args, reviewer: state.reviewer ?? (state.review?.model === "gpt-6.1-sol" ? "sol" : undefined) }, executor: state.executor, risk: state.risk, state, save,
+  await runReview({ args, executor: state.executor, risk: state.risk, state, save,
     isGit: state.git !== false, cardAbs: state.card, liveDir, name: state.name, repoAbs: state.repo, taskDir, remainingMin: () => 30 });
   state.reviewOnly = { verdict: state.review.verdict, at: new Date().toISOString() };
   if (!["out_of_scope", "review_error", "review_pending"].includes(outcome) || !["PASS", "FAIL"].includes(state.review.verdict)) state.outcome = outcome;
@@ -46,11 +46,9 @@ export async function runReview(ctx) {
   } = ctx;
 
   state.stage = "reviewing";
-  const floorSol = executor === "luna" || executor === "sol" || risk === "high" || args.reviewer === "sol";
-  const reviewer = floorSol ? "gpt-6.1-sol" : "gpt-6-luna";
+  const reviewer = "gpt-6.1-sol"; // sol is the only review gate (ADR-0003)
 
   state.review = { model: reviewer, verdict: null };
-  if (args.reviewer === "luna" && floorSol) state.review.raised = true;
 
   if (quotaOf("codex")?.full) {
     state.outcome = "review_pending";
@@ -61,15 +59,13 @@ export async function runReview(ctx) {
   }
   save(state);
 
-  let reviewPrompt;
-  if (isGit) {
-    const beforePathsList = Object.keys(state.before || {}).sort();
-    const beforePathsStr = beforePathsList.length > 0 ? beforePathsList.join(", ") : "none";
-    reviewPrompt = `Review the working-tree changes against ${cardAbs}. Run git status and git diff (include untracked files the card creates); read only the diff, the card and the code the diff touches. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md, review.md and reply.md under docs/orch/<task>/ are always allowed (reply.md is written by the runner). These files already had uncommitted changes before this task: ${beforePathsStr}. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each starting with a priority tag, then file:line, the problem, the fix and the code line that confirms it (read it; drop any finding you cannot confirm in the code) — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files. Priority: [P0]/[P1] = changes behaviour, a computed result or a Parameters value, breaks the card's Goal or Check, bypasses a check, or skips a step; [P2]/[P3] = everything else. VERDICT: FAIL only when at least one [P0] or [P1] finding exists. Also list bloat the diff adds (re-implemented helper or stdlib, an abstraction with one use, dead code, unrequested options); bloat alone does not make it FAIL.`;
-  } else {
-    const touchedList = (state.touched || []).join(", ");
-    reviewPrompt = `Review the changes against ${cardAbs}. This folder is not a git repository; the task changed exactly these files: ${touchedList}. Read only those files and the card. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md, review.md and reply.md under docs/orch/<task>/ are always allowed (reply.md is written by the runner). Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each starting with a priority tag, then file:line, the problem, the fix and the code line that confirms it (read it; drop any finding you cannot confirm in the code) — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, files outside the card, copied code, junk files. Priority: [P0]/[P1] = changes behaviour, a computed result or a Parameters value, breaks the card's Goal or Check, bypasses a check, or skips a step; [P2]/[P3] = everything else. VERDICT: FAIL only when at least one [P0] or [P1] finding exists. Also list bloat the diff adds (re-implemented helper or stdlib, an abstraction with one use, dead code, unrequested options); bloat alone does not make it FAIL.`;
-  }
+  const touchedList = (state.touched || []).join(", ") || "none";
+  const beforePathsList = Object.keys(state.before || {}).sort();
+  const beforePathsStr = beforePathsList.length > 0 ? beforePathsList.join(", ") : "none";
+  const where = isGit
+    ? `Run git diff (and read untracked files the card creates) for these files only. These files already had uncommitted changes before this task: ${beforePathsStr}. Those earlier changes are not part of it, but review any further change this task made in them.`
+    : "This folder is not a git repository; read those files and the card.";
+  const reviewPrompt = `Review the changes against ${cardAbs}. The runner found that the task changed exactly these files: ${touchedList}. Review only these files; file scope was already checked by the runner, so do not judge it. ${where} Read the card and the code the changes touch. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md, review.md and reply.md under docs/orch/<task>/ are always allowed (reply.md is written by the runner). Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. If a finding is one instance of a whole class of bug, name the class and use grep to list every occurrence. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each starting with a priority tag, then file:line, the problem, the fix and the code line that confirms it (read it; drop any finding you cannot confirm in the code) — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, copied code, junk files. Priority: [P0]/[P1] = changes behaviour, a computed result or a Parameters value, breaks the card's Goal or Check, bypasses a check, or skips a step; [P2]/[P3] = everything else. VERDICT: FAIL only when at least one [P0] or [P1] finding exists. Also list bloat the diff adds (re-implemented helper or stdlib, an abstraction with one use, dead code, unrequested options); bloat alone does not make it FAIL.`;
 
   const reviewStream = path.posix.join(liveDir, `codex-review-${name}.jsonl`);
   const reviewExit = path.posix.join(liveDir, `codex-review-${name}.exit`);

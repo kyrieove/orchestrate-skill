@@ -84,9 +84,8 @@ export function printSummary(ctx) {
 
   const reviewMdAbs = path.resolve(repoAbs, taskDir, "review.md").replaceAll("\\", "/");
   if (state.review?.model) {
-    const raisedSuffix = state.review?.raised ? " (luna requested, floor sol)" : "";
     if (state.review.verdict === "pending") {
-      lines.push(`review: pending ${state.review.model} (${state.review.reason})${raisedSuffix}`);
+      lines.push(`review: pending ${state.review.model} (${state.review.reason})`);
     } else {
       let firstLine = "-";
       let restLines = [];
@@ -97,7 +96,7 @@ export function printSummary(ctx) {
         restLines = revLines.slice(1, 13).filter((l) => l !== undefined);
       }
       const retriedSuffix = state.review?.retried ? " (retried)" : "";
-      lines.push(`review: ${state.review.model} ${firstLine}${retriedSuffix}${raisedSuffix}`);
+      lines.push(`review: ${state.review.model} ${firstLine}${retriedSuffix}`);
       if (restLines.length > 0 && restLines.some((l) => l.trim())) {
         lines.push(restLines.join("\n"));
       }

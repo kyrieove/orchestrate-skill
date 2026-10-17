@@ -118,12 +118,6 @@ if (isFix) {
     process.exit(2);
   }
 }
-// --reviewer sol: shared tooling gets the high-tier reviewer at medium risk (SKILL.md Review).
-if (args.reviewer !== undefined && !["luna", "sol"].includes(args.reviewer)) {
-  console.error("Invalid reviewer:", args.reviewer);
-  process.exit(2);
-}
-
 // luna and sol never fall back: refuse to start when codex's quota is full.
 // Reviews are not prechecked (they go review_pending instead).
 const needsCodex = !args.commit && (["luna", "sol"].includes(executor) || (risk === "high" && !isFix && !recon));
@@ -354,7 +348,6 @@ if (isFix) {
     cardSha,
     executor,
     risk,
-    reviewer: args.reviewer,
     execCheck: args["exec-check"] === true,
     repo: repoAbs,
     git: isGit,
