@@ -139,9 +139,9 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    read-only guard, files check and Check, no second conformance review; the summary carries the fix diff, which is
    all Claude reads. High risk: recompute the key number again. Max 2 fixes, then a new card in `<task>-v2/`.
 6. **Accept.** Turn `## Acceptance (draft)` into `## Acceptance`: replace the `TODO`s (verdict: accepted / review
-   pending / rejected; `review findings: N real / M false positive / K missed`, with tier and reviewer; recompute result
+   pending / rejected; `review findings: N real / M false positive (scope S, card C, wrong W) / K missed`, with tier and reviewer; recompute result
    for high risk); the files, Check and `tokens:` lines are already filled in. When the two TODOs are all that is left,
-   skip the edit: `--commit ... --accept accepted --findings "N real / M false positive / K missed"` fills them and
+   skip the edit: `--commit ... --accept accepted --findings "N real / M false positive (scope S, card C, wrong W) / K missed"` fills them and
    commits in one call (the card is written only if every commit gate passes). Otherwise
    `node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --commit --name <name> --message "<msg>"` — it stages only the
    card's files + card.md + review.md + reply.md (and appends to `docs/review-log.md` when the project has one), commits, prints the
@@ -226,7 +226,8 @@ Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
    high risk, commit hash, and two ledger lines below), commit code + card + review, **don't push**.
    - `tokens:` the output of `node D:/2/dev/orch-runner/orchestrate/ledger.mjs <name>` (one row per executor and reviewer run),
      taken before any same-name dispatch clears the streams; fix rounds add their own row.
-   - `review findings:` N real / M false positive / K missed (a bug found later by Claude or a later review), with tier and reviewer.
+   - `review findings:` N real / M false positive (scope S, card C, wrong W) / K missed (a bug found later by Claude or a later review), with tier and reviewer.
+     False positives by cause: `scope` = the file was not this card's, `card` = the card was wrong, `wrong` = the reviewer misread the code; S + C + W = M, and the split may be left out only when M is 0.
      When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
      with where it was found and the fix commit, then commit the card. Long runs get the same two lines (the run itself adds no executor row).
    After 10–15 cards, change the Modes table from these rows, not from impressions (user).

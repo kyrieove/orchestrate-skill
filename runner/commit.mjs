@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { getSection, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
+import { getSection, parseFindings, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
 import { q, runBash } from "./lib.mjs";
 import { snapshot, getReadOnlyDiff } from "./snapshot.mjs";
 
@@ -171,6 +171,8 @@ export function runCommit(args, ctx) {
   const shortHead = revRes.stdout.trim();
   console.log(shortHead);
   state.commit = shortHead;
+  const findingsLine = acceptanceSection.match(/^- review findings: .*$/m)?.[0];
+  state.findings = findingsLine ? parseFindings(findingsLine) : null;
   const tmp = `${stateFile}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
   fs.renameSync(tmp, stateFile);
@@ -189,14 +191,14 @@ function fillDraft(text, { accept, findings }) {
     console.error('--accept must be "accepted", "review pending" or "rejected"');
     process.exit(2);
   }
-  if (typeof findings !== "string" || !/^\d+ real \/ \d+ false positive \/ \d+ missed$/.test(findings)) {
-    console.error('--findings must look like "1 real / 0 false positive / 0 missed"');
+  if (typeof findings !== "string" || !/^\d+ real \/ \d+ false positive(?: \(scope \d+, card \d+, wrong \d+\))? \/ \d+ missed$/.test(findings) || !parseFindings(findings)) {
+    console.error('--findings must look like "1 real / 0 false positive / 0 missed", or with false positives split: "1 real / 3 false positive (scope 2, card 1, wrong 0) / 0 missed"');
     process.exit(2);
   }
   const draft = text.slice(head)
     .replace(/^(##\s+Acceptance)\s+\(draft\)[ \t]*$/im, "$1")
     .replace(/^- verdict: .*$/m, `- verdict: ${accept}`)
-    .replace("TODO N real / M false positive / K missed", findings);
+    .replace(/TODO N real \/ M false positive(?: \(scope S, card C, wrong W\))? \/ K missed/, () => findings);
   return text.slice(0, head) + draft;
 }
 

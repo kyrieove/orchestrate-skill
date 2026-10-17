@@ -12,6 +12,10 @@ if (!fs.existsSync(stateDir)) {
 
 const files = fs.readdirSync(stateDir).filter((f) => f.endsWith(".json")).sort();
 const groups = new Map();
+// First pass = finished execution with no --fix round and no review FAIL (passed_no_review / review_pass).
+const finished = new Set(["passed_no_review", "review_pass", "review_fail", "fix_passed", "check_failed", "out_of_scope", "readonly_violated", "failed", "blocked", "review_error"]);
+const fp = { cards: 0, scope: 0, card: 0, wrong: 0 };
+let firstPass = 0, finishedCards = 0;
 const unreadable = [];
 let totalCards = 0;
 
@@ -42,6 +46,14 @@ for (const file of files) {
     ? roundSecs.reduce((sum, r) => sum + r.seconds, 0)
     : (state.exec && typeof state.exec.seconds === "number" ? state.exec.seconds : 0);
   const outcome = state.outcome || "unknown";
+  if (finished.has(outcome) || fixesCount > 0) {
+    finishedCards++;
+    if (fixesCount === 0 && (outcome === "passed_no_review" || outcome === "review_pass")) firstPass++;
+  }
+  if (state.findings) {
+    fp.cards++;
+    for (const k of ["scope", "card", "wrong"]) fp[k] += state.findings[k] || 0;
+  }
 
   let fresh = 0;
   let cached = 0;
@@ -104,6 +116,8 @@ for (const key of sortedKeys) {
 }
 
 console.log(`total cards ${totalCards}`);
+console.log(`first-pass ${firstPass}/${finishedCards}${finishedCards ? ` (${Math.round(100 * firstPass / finishedCards)}%)` : ""}`);
+if (fp.cards) console.log(`false positives (${fp.cards} accepted cards): scope ${fp.scope}  card ${fp.card}  wrong ${fp.wrong}`);
 // A state file that doesn't parse is missing from every number above: say so, don't let the totals look complete.
 if (unreadable.length > 0) {
   console.log(`skipped unreadable state files: ${unreadable.length} (${unreadable.join(", ")})`);

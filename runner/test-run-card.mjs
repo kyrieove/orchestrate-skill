@@ -505,6 +505,9 @@ No rm, no git push
     const draftCard = fs.readFileSync(cardPath, "utf8");
     const resOBad = runCard("case-m", { args: ["--commit", "--message", "t", "--accept", "accepted", "--findings", "none"] });
     assert.strictEqual(resOBad.status, 2);
+    for (const bad of ["9 real / garbage / 0 real / 0 false positive / 0 missed", "-1 real / 0 false positive / 0 missed"]) {
+      assert.strictEqual(runCard("case-m", { args: ["--commit", "--message", "t", "--accept", "accepted", "--findings", bad] }).status, 2, bad);
+    }
     assert.strictEqual(fs.readFileSync(cardPath, "utf8"), draftCard);
 
     fs.writeFileSync(path.join(tempRepo, "z.txt"), "unrelated untracked", "utf8");
@@ -516,6 +519,7 @@ No rm, no git push
     assert.ok(/^## Acceptance\r?\n- verdict: accepted$/m.test(acceptedCard), acceptedCard);
     assert.ok(acceptedCard.includes("- review findings: 1 real / 0 false positive / 0 missed ("));
     assert.ok(!/TODO|\(draft\)/.test(acceptedCard));
+    assert.strictEqual(readState("case-m").findings.real, 1);
 
     const showRes = spawnSync("git", ["-C", tempRepo, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
     assert.strictEqual(showRes.status, 0);
@@ -850,7 +854,8 @@ No rm, no git push
       outcome: "review_pass",
       exec: { seconds: 300 },
       ledger: [{ role: "exec", fresh: 300000, cached: 800000, out: 30000 }],
-      fixes: []
+      fixes: [],
+      findings: { real: 1, falsePositive: 3, scope: 2, card: 1, wrong: 0, missed: 0 }
     };
     const state4 = {
       name: "stats-4",
@@ -911,6 +916,8 @@ No rm, no git push
     assert.ok(solHighLine.includes("cards 1"), "sol/high line should contain 'cards 1'");
 
     assert.ok(lines.some((l) => l === "total cards 5"), "Output should contain 'total cards 5'");
+    assert.ok(lines.some((l) => /^first-pass \d+\/\d+ \(\d+%\)$/.test(l)), `first-pass line missing: ${statsOut}`);
+    assert.ok(lines.some((l) => l.endsWith("scope 2  card 1  wrong 0")), `false positive split missing: ${statsOut}`);
 
     fs.rmSync(statsLive, { recursive: true, force: true });
     passedCount++;
@@ -1993,11 +2000,31 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 55) {
-    console.log("55/55 passed");
+  // Case S4: false positives are split into scope / card / wrong; the split must add up.
+  {
+    const { parseFindings } = await import(new URL("./card.mjs", import.meta.url));
+    assert.deepStrictEqual(parseFindings("1 real / 0 false positive / 0 missed"), { real: 1, falsePositive: 0, scope: 0, card: 0, wrong: 0, missed: 0 });
+    assert.deepStrictEqual(parseFindings("- review findings: 0 real / 3 false positive (scope 2, card 1, wrong 0) / 1 missed (medium, gpt-6.1-sol)"),
+      { real: 0, falsePositive: 3, scope: 2, card: 1, wrong: 0, missed: 1 });
+    assert.strictEqual(parseFindings("1 real / 2 false positive / 0 missed"), null);
+    assert.strictEqual(parseFindings("1 real / 3 false positive (scope 1, card 1, wrong 0) / 0 missed"), null);
+    passedCount++;
+  }
+
+  // Case S4b: a negative number is not a count.
+  {
+    const { parseFindings } = await import(new URL("./card.mjs", import.meta.url));
+    assert.strictEqual(parseFindings("-1 real / 0 false positive / 0 missed"), null);
+    assert.strictEqual(parseFindings("9 real / garbage / 0 real / 0 false positive / 0 missed"), null);
+    assert.strictEqual(parseFindings("- review findings: 9 real / garbage / 0 real / 0 false positive / 0 missed (medium, sol)"), null);
+    passedCount++;
+  }
+
+  if (passedCount === 57) {
+    console.log("57/57 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/55 passed`);
+    console.error(`Only ${passedCount}/57 passed`);
     process.exitCode = 1;
   }
 } finally {

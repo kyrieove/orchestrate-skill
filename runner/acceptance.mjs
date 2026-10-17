@@ -60,7 +60,7 @@ export function appendAcceptanceDraft(ctx) {
       checkLine,
       "- tokens:",
       ...tokenLines,
-      `- review findings: TODO N real / M false positive / K missed (${risk}, ${reviewerStr})`
+      `- review findings: TODO N real / M false positive (scope S, card C, wrong W) / K missed (${risk}, ${reviewerStr})`
     ].join("\n");
 
     fs.writeFileSync(cardAbs, `${cleanCardText}\n\n${draftSection}\n`, "utf8");

@@ -190,6 +190,17 @@ export function lintCard(cardText, { recon = false, risk = "", repo = process.cw
   return problems;
 }
 
+// "N real / M false positive (scope S, card C, wrong W) / K missed"; the split is optional only when M is 0.
+// scope = the file was not this card's; card = the card was wrong; wrong = the reviewer misread the code.
+export function parseFindings(line) {
+  const m = line.match(/^(?:- review findings: )?(\d+) real \/ (\d+) false positive(?: \(scope (\d+), card (\d+), wrong (\d+)\))? \/ (\d+) missed(?: \([^()]*\))?$/);
+  if (!m) return null;
+  const [real, fp, missed] = [+m[1], +m[2], +m[6]];
+  const split = m[3] === undefined ? null : { scope: +m[3], card: +m[4], wrong: +m[5] };
+  if (split ? split.scope + split.card + split.wrong !== fp : fp > 0) return null;
+  return { real, falsePositive: fp, ...(split ?? { scope: 0, card: 0, wrong: 0 }), missed };
+}
+
 export function isJunkPath(repoRelPath) {
   const norm = repoRelPath.replaceAll("\\", "/");
   const segments = norm.split("/");
