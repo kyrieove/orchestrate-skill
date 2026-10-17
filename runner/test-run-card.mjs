@@ -1981,11 +1981,23 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 54) {
-    console.log("54/54 passed");
+  // Case S3: a card with an optional ## Setup section still lints and runs.
+  {
+    resetRepo();
+    writeCard();
+    const text = fs.readFileSync(cardPath, "utf8").replace("## Check\n", "## Setup\n`true`\n\n## Check\n");
+    const setupCard = path.join(tempLive, "setup.md").replaceAll("\\", "/");
+    fs.writeFileSync(setupCard, text, "utf8");
+    const res = runCard("case-s3", { card: setupCard, env: { ...baseEnv, ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'" } });
+    assert.strictEqual(res.status, 0, res.stderr);
+    passedCount++;
+  }
+
+  if (passedCount === 55) {
+    console.log("55/55 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/54 passed`);
+    console.error(`Only ${passedCount}/55 passed`);
     process.exitCode = 1;
   }
 } finally {
