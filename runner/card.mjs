@@ -1,7 +1,10 @@
 import path from "node:path";
+import os from "node:os";
 import fs from "node:fs";
+import { spawnSync } from "node:child_process";
 
-export const exemptTaskPath = /^docs\/orch\/[^/]+\/(card|review|reply)\.md$/;
+// Everything under docs/orch/ (cards, reviews, replies, other tasks' files) is never scope or read-only evidence.
+export const exemptTaskPath = /^docs\/orch\//;
 
 export function concurrentClaims(stateDir, self) {
   const claims = [];
@@ -92,7 +95,26 @@ export function getSection(text, title) {
   return inSection ? sectionLines.join("\n") : null;
 }
 
-export function lintCard(cardText, { recon = false, risk = "" } = {}) {
+// Backticked paths of ## Files: before "read-only" = may change, after = read-only.
+export function parseFiles(cardText) {
+  const files = getSection(cardText, "Files") || "";
+  const idx = files.search(/read-only/i);
+  const ticks = (t) => [...t.matchAll(/`([^`]+)`/g)].map((m) => m[1].trim());
+  return {
+    mayChange: ticks(idx >= 0 ? files.slice(0, idx) : files).map((e) => e.replace(/\s+\(new\)$/i, "")),
+    readOnly: idx >= 0 ? ticks(files.slice(idx + "read-only".length)) : [],
+  };
+}
+
+export function extractCheck(cardText) {
+  const sec = getSection(cardText, "Check");
+  if (sec === null) return null;
+  const fenced = sec.match(/```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)```/);
+  if (fenced) return fenced[1].trim();
+  return sec.match(/`([^`]+)`/)?.[1].trim() ?? null;
+}
+
+export function lintCard(cardText, { recon = false, risk = "", repo = process.cwd() } = {}) {
   const problems = [];
   const requiredSections = ["Goal", "Risk", "Files", "Steps", "Don't"];
   if (!recon) {
@@ -145,6 +167,23 @@ export function lintCard(cardText, { recon = false, risk = "" } = {}) {
     const hasInline = /`[^`]+`/.test(checkSection);
     if (!hasFenced && !hasInline) {
       problems.push("Check section must have a fenced block or backticked span");
+    }
+
+    // A may-change path inside a read-only path can never pass: the guard ends the run readonly_violated.
+    const { mayChange, readOnly } = parseFiles(cardText);
+    const abs = (p) => path.resolve(repo, p.replace(/^~(?=\/|$)/, os.homedir()));
+    const inside = (child, parent) => { const r = path.relative(parent, child); return r === "" || (r !== ".." && !r.startsWith(".." + path.sep) && !path.isAbsolute(r)); };
+    for (const m of mayChange) {
+      if (exemptTaskPath.test(path.relative(repo, abs(m)).replaceAll("\\", "/") + "/")) continue;
+      const ro = readOnly.find((r) => inside(abs(m), abs(r)));
+      if (ro) problems.push(`Files: may-change '${m}' is inside read-only '${ro}'`);
+    }
+
+    // The first word of the Check is an absolute path that does not exist: the Check cannot run.
+    // Tested with bash, which is what runs the Check (handles /d/x and C:/x alike).
+    const first = extractCheck(cardText)?.match(/^\s*(?:"([^"]*)"|'([^']*)'|([^\s;&|<>()]+))/)?.slice(1).find((x) => x !== undefined)?.replaceAll("\\", "/");
+    if (first && /^([A-Za-z]:)?\//.test(first) && spawnSync("bash", ["-c", 'test -e "$1"', "_", first]).status !== 0) {
+      problems.push(`Check: '${first}' does not exist`);
     }
   }
 

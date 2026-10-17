@@ -104,7 +104,7 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl agent-live/codex-plan-<name>.jsonl
    ```
    Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
-   command. The runner lints the card (exit 2 lists every problem; nothing has started; exit 2 with `codex quota used up` → codex quota full for a luna/sol executor or a high-risk card: tell the user), snapshots git status + content
+   command. The runner lints the card (exit 2 lists every problem, among them a may-change path inside a read-only path and a Check whose first word is an absolute path that does not exist; nothing has started; exit 2 with `codex quota used up` → codex quota full for a luna/sol executor or a high-risk card: tell the user), snapshots git status + content
    hashes, runs the Check once as a baseline (summary `baseline check:`; red before the executor = not its fault), for high
    risk runs a read-only sol plan review of the card (`PLAN: REVISE` stops before execution), runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
@@ -213,8 +213,7 @@ Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
    `python <script> 2>&1 | tee ~/.claude/agent-live/run-<name>.jsonl; echo ${PIPESTATUS[0]} > ~/.claude/agent-live/run-<name>.exit`
    — the script appends `k/N 已完成：… · 正在：…` to `~/.claude/agent-live/run-<name>.progress` after each checkpoint.
    A Bash job is killed at 2 h: split longer runs into resumable parts.
-5. **Touched files.** Take the snapshot again as *after*. Exempt: `docs/orch/<task>/card.md` and
-   `review.md`. Any other touched file not in the card's `## Files` → 🛑 stop, show it, let the user decide
+5. **Touched files.** Take the snapshot again as *after*. Exempt: everything under `docs/orch/`. Any other touched file not in the card's `## Files` → 🛑 stop, show it, let the user decide
    (never auto-revert). Obvious junk (`__pycache__`, `*.log`, `tmp*`) is deleted only after the user says so
    in one line.
 6. **Review** per the risk tier.

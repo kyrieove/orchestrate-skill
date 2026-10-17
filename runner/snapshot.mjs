@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { exemptTaskPath } from "./card.mjs";
 
 export function snapshot(repoAbs, isGit) {
   if (!isGit) {
@@ -163,8 +164,6 @@ export function getReadOnlyDiff(beforeStats, paths, { repoAbs, normLiveDir, card
     }
   }
 
-  if (diffs.length === 0) return null;
-
   const repoPrefix = repoAbs.endsWith("/") ? repoAbs : repoAbs + "/";
   const formatted = diffs.map((absP) => {
     if (absP === repoAbs) return ".";
@@ -173,6 +172,6 @@ export function getReadOnlyDiff(beforeStats, paths, { repoAbs, normLiveDir, card
     }
     return absP;
   });
-  formatted.sort();
-  return formatted;
+  const kept = formatted.filter((p) => !exemptTaskPath.test(p)).sort();
+  return kept.length ? kept : null;
 }

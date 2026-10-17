@@ -5,7 +5,7 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { q, runBash, quotaOf } from "./lib.mjs";
-import { parseArgs, getSection, lintCard, isJunkPath, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
+import { parseArgs, getSection, extractCheck, lintCard, isJunkPath, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
 import { snapshot, statTree, getReadOnlyDiff } from "./snapshot.mjs";
 import { runCommit, runRecheck } from "./commit.mjs";
 import { runExecutor } from "./executor.mjs";
@@ -164,7 +164,7 @@ if (isFix) {
     process.exit(2);
   }
 } else if (!args.commit) {
-  const lintProblems = lintCard(cardText, { recon, risk });
+  const lintProblems = lintCard(cardText, { recon, risk, repo: repoAbs });
   if (lintProblems.length > 0) {
     for (const prob of lintProblems) {
       console.error(`lint: ${prob}`);
@@ -173,19 +173,8 @@ if (isFix) {
   }
 }
 
-const checkSection = getSection(cardText, "Check");
-let check = null;
-if (checkSection !== null) {
-  const fencedMatch = checkSection.match(/```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)```/);
-  if (fencedMatch) {
-    check = fencedMatch[1].trim();
-  } else {
-    const inlineMatch = checkSection.match(/`([^`]+)`/);
-    if (inlineMatch) {
-      check = inlineMatch[1].trim();
-    }
-  }
-} else if (!recon) {
+const check = extractCheck(cardText);
+if (check === null && getSection(cardText, "Check") === null && !recon) {
   console.error("No ## Check section found in card");
   process.exit(2);
 }

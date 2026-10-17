@@ -1929,11 +1929,63 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 50) {
-    console.log("50/50 passed");
+  // Case S2a: may-change inside read-only → lint failure, no state file.
+  {
+    resetRepo();
+    writeCard();
+    const text = fs.readFileSync(cardPath, "utf8").replace("`a.txt`, `b.txt` / read-only: `data/`", "`data/f.txt` / read-only: `data/`");
+    const lintCard = path.join(tempLive, "lint-a.md").replaceAll("\\", "/");
+    fs.writeFileSync(lintCard, text, "utf8");
+    const res = runCard("case-s2a", { card: lintCard });
+    assert.strictEqual(res.status, 2, res.stderr);
+    assert.ok(res.stderr.includes("inside read-only"), res.stderr);
+    passedCount++;
+  }
+
+  // Case S2b: Check starts with an absolute path that does not exist → lint failure.
+  {
+    resetRepo();
+    writeCard("/no/such/dir/tool --x");
+    const res = runCard("case-s2b");
+    assert.strictEqual(res.status, 2, res.stderr);
+    assert.ok(res.stderr.includes("does not exist"), res.stderr);
+    passedCount++;
+  }
+
+  // Case S2c: a file under docs/orch/ written by someone else is neither out of scope nor a read-only violation.
+  {
+    resetRepo();
+    writeCard();
+    const env = { ...baseEnv, ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; mkdir -p docs/orch/other; echo n > docs/orch/other/notes.md; echo 'STATUS: done'" };
+    delete env.ORCH_RUNNER_FAKE_REVIEW;
+    const res = runCard("case-s2c", { env });
+    assert.strictEqual(res.status, 0, res.stderr);
+    const st = readState("case-s2c");
+    assert.deepStrictEqual(st.outOfScope ?? [], []);
+    assert.strictEqual(st.outcome, "passed_no_review");
+    passedCount++;
+  }
+
+  // Case S2d: read-only `.` covers every may-change path; an absolute Check path bash can see passes lint.
+  {
+    resetRepo();
+    writeCard();
+    const text = fs.readFileSync(cardPath, "utf8").replace("`a.txt`, `b.txt` / read-only: `data/`", "`src/a.js` / read-only: `.`");
+    const lintCard = path.join(tempLive, "lint-d.md").replaceAll("\\", "/");
+    fs.writeFileSync(lintCard, text, "utf8");
+    const res = runCard("case-s2d", { card: lintCard });
+    assert.strictEqual(res.status, 2, res.stderr);
+    assert.ok(res.stderr.includes("inside read-only"), res.stderr);
+    writeCard("/usr/bin/bash -c true");
+    assert.strictEqual(runCard("case-s2e").status, 0);
+    passedCount++;
+  }
+
+  if (passedCount === 54) {
+    console.log("54/54 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/50 passed`);
+    console.error(`Only ${passedCount}/54 passed`);
     process.exitCode = 1;
   }
 } finally {
