@@ -26,6 +26,9 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 | `/sol` | codex `gpt-6.1-sol` | fixed |
 | `/wb` | CodeBuddy CLI (WorkBuddy account) `deepseek-v4.1-flash` high | fixed |
 
+`agy` runs on CodeBuddy CLI too, model `antigravity/gemini-3.8-flash` through magpie's gateway: the Antigravity account magpie
+signed in to (kyriedrewove), independent of the agy.exe / desktop account (kyrieove). Not agy.exe any more (2026-10-17, user).
+
 **Code worker** (user): before the first code card of every `/orch` task ask "写代码交给 agy 还是 wb？";
 Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its misses.
 
@@ -40,7 +43,7 @@ Natural language: naming one executor ("让 / 交给 / 只让 agy|luna|sol|wb �
 without a model → `/orch`, choosing luna; plain 派活 / 分工 / 编排 → `/orch`. A slash
 command beats wording inside its arguments (say so in one line if they conflict). Empty arguments → the
 task in progress; none → ask in one line. luna and sol need no permission prompt (user); any
-other codex model → ask, stating the concrete job. agy's model is fixed.
+other codex model → ask, stating the concrete job. agy's model is fixed (`antigravity/gemini-3.8-flash`).
 
 **Executor fails** (agy 429 / RESOURCE_EXHAUSTED / quota text, codex unreachable):
 - fixed modes (`/agy`, `/luna`, `/sol`, `/wb`) → stop and tell the user; never switch executor on your own.
@@ -219,8 +222,7 @@ Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
    in one line.
 6. **Review** per the risk tier.
 7. **Fix if needed.** Append `## Fix 1` to the card (exact steps) and re-run the **same** executor with
-   `--conversation <id>` for agy (≈ 80 % of the fixed overhead is then cached), unless that session did a long
-   run — then a fresh agy call; codex executors get a fresh `codex exec` with "carry out ## Fix N of <card>". Claude reads
+   a fresh agy call (CodeBuddy has no `--conversation`); codex executors get a fresh `codex exec` with "carry out ## Fix N of <card>". Claude reads
    only that fix's diff (it is small) — no second conformance review; high risk: recompute the key number
    again. Max 2 fixes, then write a new card in `<task>-v2/` and keep the old folder. A `review.md` without a
    first-line VERDICT counts as FAIL: re-run the review once.

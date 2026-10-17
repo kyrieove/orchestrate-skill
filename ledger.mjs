@@ -31,7 +31,7 @@ for (const f of files) {
     try { e = JSON.parse(line); } catch { badLines++; continue; }
     if (!e || typeof e !== "object") { badLines++; continue; }
     model = e.init?.model ?? (typeof e.model === "string" ? e.model : model);
-    if (f.startsWith("agy-")) {
+    if (f.startsWith("agy-") && e.type !== "result") {
       const u = e.step_update?.usage ?? e.usage ?? e.step?.usage;
       if (e.event === "step_update" && u) {
         hasStepUsage = true;
@@ -60,7 +60,7 @@ for (const f of files) {
       }
     }
   }
-  if (f.startsWith("agy-")) {
+  if (f.startsWith("agy-") && fresh + cached + out === 0) {
     if (hasStepUsage) {
       fresh = stepFresh; cached = stepCached; out = stepOut;
     } else {

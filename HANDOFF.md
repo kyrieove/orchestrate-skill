@@ -4,7 +4,13 @@
 Claude Code 照常从那里加载 skill。在 D 盘这边编辑和提交（`.claude` 里面的路径每次编辑都要确认）。
 旧副本备份在 `~/.claude/_archive/2026-10-05/orchestrate`。
 
-## 2026-10-16（最新，新会话先读）
+## 2026-10-17（最新，新会话先读）
+
+- **agy 执行器改走 magpie**（旧：调 agy.exe）：不再调 agy.exe（它和桌面端共用凭据管理器里的 kyrieove，无法独立），改 `codebuddy --model antigravity/gemini-3.8-flash`，经 magpie 网关用 magpie 里登录的 kyriedrewove。前提：`magpie "CodeBuddy Code" antigravity/gemini-3.8-flash` 已把模型写进 codebuddy。`--fix` 不再续会话（codebuddy 无 `--conversation`）。token-weather 的 Agy 额度（`hooks/quota.mjs`）同步读 magpie 的 kyriedrewove。
+- 判断 agy 卡跑没跑过：查 `~/.config/magpie/usage.jsonl` 里 `agent=codebuddy` 的行。卡档案在各项目自己的 `docs/orch/`，不在 orch-runner 里。
+- 额度栏 Agy 5h 0%：已验证（`quota.mjs --raw`）桶取对了，"Gemini Models" 组含 Flash，5h 剩 100%、周剩 96.9%；用量太小，整数百分比显示 0%。
+
+## 2026-10-16
 
 - 测试 49/49 passed。提交：`001a6b0`（runBash 改用脚本文件、concurrent 路径、commit 拒绝提示）→ `2950da0`。
 - `--commit --accept accepted --findings "N real / M false positive / K missed"`：一次调用填草稿的两个 TODO 并提交；所有门槛过了才写卡片。其他内容（`claude fix:`、high 的重算结果）仍需先手改卡片。
@@ -110,5 +116,5 @@ run-card.mjs 仍有 677 行（目标 600），剩下是参数/状态初始化和
 
 **坑**
 1. 这台机器的 `python3` 是 Windows 商店占位程序，用 `python`。
-2. agy 的 `-p` 忽略 stdin；codex 必须 `< /dev/null`；agy 结果在 stream 最后一行 `"event":"result"`。
+2. codex 和 codebuddy 都要 `< /dev/null`；结果在 stream 里 `"type":"result"` 那行（agy.exe 的 `"event":"result"` 已不用）。
 3. Bash 后台任务 2 h 被杀：runner 默认超时 100 min。

@@ -1281,6 +1281,29 @@ No rm, no git push
     passedCount++;
   }
 
+  // Case Q4b: agy-fallback "off", --executor agy: one codebuddy call on the magpie Gemini model, not the wb fallback.
+  {
+    resetRepo();
+    writeCard();
+    fs.writeFileSync(`${tempLive}/agy-fallback`, "off", "utf8");
+    fs.rmSync(`${fakeBin}/argv`, { force: true });
+    const envQ4b = { ...wbEnv };
+    delete envQ4b.ORCH_RUNNER_FAKE_EXEC;
+    delete envQ4b.ORCH_RUNNER_FAKE_REVIEW;
+
+    const res4b = runCard("case-q4b", { risk: "low", env: envQ4b, args: ["--executor", "agy"] });
+
+    assert.strictEqual(res4b.status, 0, `Case Q4b exit status was ${res4b.status}: ${res4b.stderr}`);
+    const stateQ4b = readState("case-q4b");
+    assert.ok(!stateQ4b.execViaWb);
+    const argvQ4b = fs.readFileSync(`${fakeBin}/argv`, "utf8").trim().split("\n");
+    assert.strictEqual(argvQ4b.length, 1, `expected 1 codebuddy call, got: ${argvQ4b.join(" | ")}`);
+    assert.ok(argvQ4b[0].includes("antigravity/gemini-3.8-flash"), argvQ4b[0]);
+    fs.rmSync(`${fakeBin}/argv`, { force: true });
+    fs.rmSync(`${tempLive}/agy-fallback`, { force: true });
+    passedCount++;
+  }
+
   // Case Q5 (new): risk high, --reviewer luna, fake exec + fake review PASS:
   // state.review.model === "gpt-6.1-sol", state.review.raised === true, summary contains floor sol.
   {
@@ -1909,11 +1932,11 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 49) {
-    console.log("49/49 passed");
+  if (passedCount === 50) {
+    console.log("50/50 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/49 passed`);
+    console.error(`Only ${passedCount}/50 passed`);
     process.exitCode = 1;
   }
 } finally {

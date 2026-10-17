@@ -7,7 +7,12 @@ export const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
 
 // wb = CodeBuddy CLI (WorkBuddy account) on DeepSeek v4.1 flash; replies end in a {"type":"result"} line.
 export const WB_MODEL = "deepseek-v4.1-flash";
-export const wbCmd = (prompt, extra = "") => `codebuddy -p ${q(prompt)} --model ${WB_MODEL} --effort high -y${extra}`;
+export const wbCmd = (prompt, extra = "", model = WB_MODEL) => `codebuddy -p ${q(prompt)} --model ${model} --effort high -y${extra}`;
+
+// agy cards run on CodeBuddy too, on Gemini through magpie's gateway (the account magpie has signed in to Antigravity),
+// so their quota is separate from the one agy.exe / the desktop app share. Needs the model exposed to CodeBuddy:
+// `magpie "CodeBuddy Code" antigravity/gemini-3.8-flash`.
+export const AGY_MODEL = "antigravity/gemini-3.8-flash";
 
 // "on": agy cards run on wb; "off": always agy; anything else or missing = "auto":
 // wb only while antigravity's quota is full, checked once at dispatch.
