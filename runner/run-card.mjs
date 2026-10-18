@@ -4,9 +4,9 @@ import os from "node:os";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { q, runBash, quotaOf } from "./lib.mjs";
+import { q, runBash, quotaOf, wbCmd, WB_MODEL, WB_READONLY, wbReply } from "./lib.mjs";
 import { parseArgs, getSection, extractCheck, extractCommand, lintCard, isJunkPath, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
-import { snapshot, statTree, getReadOnlyDiff } from "./snapshot.mjs";
+import { snapshot, statTree, getReadOnlyDiff, watch, changedSince } from "./snapshot.mjs";
 import { runCommit, runRecheck } from "./commit.mjs";
 import { runExecutor } from "./executor.mjs";
 import { runReview, runReviewOnly } from "./review.mjs";
@@ -36,6 +36,7 @@ let card = args.card;
 let name = args.name;
 let executor = args.executor;
 let risk = args.risk;
+let reviewer = "sol"; // "wb" = the orchestrate-codex setup: wb reviews read-only and sol does not
 let repo = args.repo;
 const timeoutMinArg = args["timeout-min"];
 
@@ -78,14 +79,15 @@ if (isFix) {
     process.exit(2);
   }
 
-  for (const [key, val] of [["executor", executor], ["risk", risk]]) {
-    if (val !== undefined && val !== existingState[key]) {
-      console.error(`--${key} '${val}' does not match state '${existingState[key]}'`);
+  for (const [key, val, saved] of [["executor", executor, existingState.executor], ["risk", risk, existingState.risk], ["reviewer", args.reviewer, existingState.reviewer ?? "sol"]]) {
+    if (val !== undefined && val !== saved) {
+      console.error(`--${key} '${val}' does not match state '${saved}'`);
       process.exit(2);
     }
   }
   executor = existingState.executor;
   risk = existingState.risk;
+  reviewer = existingState.reviewer ?? "sol";
 
   // --commit later uses the saved card and repo, so a fix must run on the same ones.
   for (const [arg, saved] of [["card", existingState.card], ["repo", existingState.repo]]) {
@@ -118,10 +120,16 @@ if (isFix) {
     console.error("Invalid risk:", risk);
     process.exit(2);
   }
+
+  reviewer = args.reviewer ?? "sol";
+  if (!["sol", "wb"].includes(reviewer)) {
+    console.error("Invalid reviewer:", reviewer);
+    process.exit(2);
+  }
 }
 // luna and sol never fall back: refuse to start when codex's quota is full.
 // Reviews are not prechecked (they go review_pending instead).
-const needsCodex = !args.commit && (["luna", "sol"].includes(executor) || (risk === "high" && !isFix && !recon));
+const needsCodex = !args.commit && (["luna", "sol"].includes(executor) || (risk === "high" && !isFix && !recon && reviewer !== "wb"));
 const quota = needsCodex ? quotaOf("codex") : null;
 if (quota?.full) {
   const { five, week } = quota;
@@ -357,6 +365,7 @@ if (isFix) {
     cardSha,
     executor,
     risk,
+    reviewer,
     execCheck: args["exec-check"] === true,
     ...(isolation ? { isolation, readOnlyPaths: iso.readOnlyPaths } : {}), // the declared read-only paths stay reserved during Setup
     repo: repoAbs,
@@ -469,17 +478,27 @@ if (!state.outcome && risk === "high" && !isFix && !recon) {
   fs.rmSync(planOut, { force: true });
 
   let planCmd;
+  const planViaWb = reviewer === "wb";
   if (process.env.ORCH_RUNNER_FAKE_PLAN) {
     planCmd = `{\nexport ORCH_PLAN_OUT=${q(planOut)}\nORCH_PLAN_OUT=${q(planOut)}\n${process.env.ORCH_RUNNER_FAKE_PLAN}\n} > ${q(planStream)} 2>&1`;
+  } else if (planViaWb) {
+    planCmd = `{ echo '{"model":"${WB_MODEL}"}'; ${wbCmd(planPrompt, WB_READONLY)} < /dev/null; } > ${q(planStream)} 2>&1`;
   } else {
     const skipGitFlag = isGit ? "" : " --skip-git-repo-check";
     planCmd = `{ echo '{"model":"gpt-6.1-sol"}'; codex exec${skipGitFlag} -s read-only -m gpt-6.1-sol -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(planOut)} --json ${q(planPrompt)} < /dev/null; } > ${q(planStream)} 2>&1`;
   }
 
+  const planBefore = planViaWb ? watch(repoAbs, isGit) : null;
   const planRes = await runBash(planCmd, { cwd: repoAbs, timeoutMin: Math.min(20, remainingMin()), exitPath: planExit });
 
   let verdict = "error";
-  if (!planRes.timedOut && planRes.exit === 0 && fs.existsSync(planOut)) {
+  // A wb plan reviewer that changed the repo has no verdict (task docs are exempt).
+  const planTouched = planViaWb ? changedSince(planBefore, repoAbs, isGit) : [];
+  if (planViaWb && !process.env.ORCH_RUNNER_FAKE_PLAN && planRes.exit === 0 && !planTouched.length) {
+    const reply = wbReply(planStream);
+    if (reply !== null) fs.writeFileSync(planOut, reply, "utf8");
+  }
+  if (!planRes.timedOut && planRes.exit === 0 && !planTouched.length && fs.existsSync(planOut)) {
     let firstLine = "";
     try {
       const content = fs.readFileSync(planOut, "utf8");
@@ -493,7 +512,7 @@ if (!state.outcome && risk === "high" && !isFix && !recon) {
   }
 
   state.plan = {
-    model: "gpt-6.1-sol",
+    model: planViaWb ? WB_MODEL : "gpt-6.1-sol",
     verdict,
     file: planOut
   };

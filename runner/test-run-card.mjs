@@ -2150,11 +2150,102 @@ No rm, no git push
     fs.rmSync(parLive, { recursive: true, force: true });
   }
 
-  if (passedCount === 60) {
-    console.log("60/60 passed");
+
+
+
+  // ---- --reviewer wb (orchestrate-codex: wb reviews read-only, sol and the codex quota are not involved) ----
+  {
+    fs.writeFileSync(`${tempLive}/quota-full.mjs`, 'console.log(JSON.stringify({ codex: { five: { pct: 100, resetMs: Date.now() + 3600000 }, week: { pct: 40, resetMs: Date.now() + 86400000 } } }))', "utf8");
+    const mkBin = (script) => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "orch-test-wbbin-")).replaceAll("\\", "/");
+      fs.writeFileSync(path.join(dir, "codebuddy"), `#!/bin/sh\nprintf '%s\\n' "$*" >> "${dir}/argv"\n${script}\n`, { mode: 0o755 });
+      return dir;
+    };
+    const reply = (text) => `cat <<'EOF'\n${stream(text)}\nEOF`;
+    const binPass = mkBin(reply("VERDICT: PASS"));
+    const binTouch = mkBin(`echo x > touched-by-reviewer.txt\n${reply("VERDICT: PASS")}`);
+    const binPlan = mkBin(`if printf '%s' "$*" | grep -q "PLAN: OK or PLAN: REVISE"; then\n${reply("PLAN: OK")}\nelse\n${reply("VERDICT: PASS")}\nfi`);
+    const binCommit = mkBin(`git -c user.name=t -c user.email=t@e.x commit -q --allow-empty -m x\n${reply("VERDICT: PASS")}`);
+    const binSelf =mkBin(`printf 'VERDICT: PASS\\n' > ${cardPath.replace(/card\.md$/, "review.md")}\necho '{"type":"system"}'`);
+    const binPlanTouch = mkBin(`echo x > touched-by-reviewer.txt\nif printf '%s' "$*" | grep -q "PLAN: OK or PLAN: REVISE"; then\n${reply("PLAN: OK")}\nelse\n${reply("VERDICT: PASS")}\nfi`);
+    const wbRun =(name, bin, risk, extra = {}) => {
+      resetRepo();
+      writeCard('node -e "process.exit(0)"', risk);
+      const env = { ...baseEnv, ORCH_QUOTA_SCRIPT: `${tempLive}/quota-full.mjs`, ORCH_RUNNER_FAKE_EXEC: "echo 3 > a.txt; echo 'STATUS: done'", PATH: `${bin}${path.delimiter}${process.env.PATH}`, ...extra };
+      for (const k of Object.keys(extra)) if (extra[k] === undefined) delete env[k];
+      return runCard(name, { risk, env, args: ["--reviewer", "wb"] });
+    };
+    try {
+      // Case W1: read-only wb review writes review.md from the result line; the full codex quota is ignored.
+      let res = wbRun("case-w1", binPass, "medium");
+      assert.strictEqual(res.status, 0, res.stderr + res.stdout);
+      let st = readState("case-w1");
+      assert.strictEqual(st.outcome, "review_pass");
+      assert.strictEqual(st.reviewer, "wb");
+      assert.strictEqual(st.review.model, "deepseek-v4.1-flash");
+      assert.strictEqual(fs.readFileSync(path.join(path.dirname(cardPath), "review.md"), "utf8").split(/\r?\n/)[0], "VERDICT: PASS");
+      const argv = fs.readFileSync(path.join(binPass, "argv"), "utf8");
+      assert.ok(argv.includes("--disallowedTools") && argv.includes("--tools"), "read-only flags");
+      passedCount++;
+
+      // Case W2: a reviewer that changed the repo is a review_error.
+      res = wbRun("case-w2", binTouch, "medium");
+      st = readState("case-w2");
+      assert.strictEqual(st.outcome, "review_error");
+      assert.match(st.review.reason, /touched-by-reviewer\.txt/);
+      // --review-only keeps the mutation error instead of restoring the earlier review_pass.
+      resetRepo();
+      res = runCard("case-w1", { env: { ...baseEnv, PATH: `${binTouch}${path.delimiter}${process.env.PATH}` }, args: ["--review-only"] });
+      st = readState("case-w1");
+      assert.strictEqual(st.outcome, "review_error");
+      passedCount++;
+
+      // Case W2b: no result line in the stream, but the reviewer wrote review.md itself: that is no verdict.
+      res = wbRun("case-w2b", binSelf, "medium");
+      st = readState("case-w2b");
+      assert.strictEqual(st.outcome, "review_error");
+      passedCount++;
+
+      // Case W2c: a reviewer that committed (the repo files look unchanged afterwards) is caught by HEAD moving.
+      res = wbRun("case-w2c", binCommit, "medium");
+      st = readState("case-w2c");
+      assert.strictEqual(st.outcome, "review_error");
+      assert.match(st.review.reason, /HEAD/);
+      passedCount++;
+
+      // Case W3: high risk: the plan review also goes through wb (no codex quota check, no codex).
+      res = wbRun("case-w3", binPlan, "high", { ORCH_RUNNER_FAKE_PLAN: undefined });
+      assert.strictEqual(res.status, 0, res.stderr + res.stdout);
+      st = readState("case-w3");
+      assert.strictEqual(st.plan.model, "deepseek-v4.1-flash");
+      assert.strictEqual(st.plan.verdict, "OK");
+      assert.strictEqual(st.outcome, "review_pass");
+      passedCount++;
+
+      // Case W3b: a plan reviewer that changed the repo has no verdict.
+      res = wbRun("case-w3b", binPlanTouch, "high", { ORCH_RUNNER_FAKE_PLAN: undefined });
+      st = readState("case-w3b");
+      assert.strictEqual(st.plan.verdict, "error");
+      assert.strictEqual(st.outcome, "plan_error");
+      passedCount++;
+
+      // Case W4: unknown reviewer; --fix must use the state's reviewer.
+      res = runCard("case-w4", { risk: "medium", args: ["--reviewer", "luna"] });
+      assert.strictEqual(res.status, 2);
+      res = runCard("case-w1", { args: ["--fix", "1", "--reviewer", "sol"] });
+      assert.strictEqual(res.status, 2); assert.match(res.stderr, /does not match state 'wb'/);
+      passedCount++;
+    } finally {
+      resetRepo();
+      for (const b of [binPass, binTouch, binPlan, binSelf, binPlanTouch, binCommit]) fs.rmSync(b, { recursive: true, force: true });
+    }
+  }
+
+  if (passedCount === 67) {
+    console.log("67/67 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/60 passed`);
+    console.error(`Only ${passedCount}/67 passed`);
     process.exitCode = 1;
   }
 } finally {

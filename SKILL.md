@@ -33,7 +33,7 @@ signed in to (kyriedrewove), independent of the agy.exe / desktop account (kyrie
 (ADR-0003: one each), or when agy failed the same card. Say the pick and the reason in one line when dispatching.
 Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its misses.
 
-**wb is agy's fallback, never a reviewer** (user). Switch `D:/2/dev/orch-runner/orchestrate/agy-fallback`:
+**wb is agy's fallback, never a reviewer** (user), except under `--reviewer wb` (below). Switch `D:/2/dev/orch-runner/orchestrate/agy-fallback`:
 `auto` (default, also when missing) → at dispatch the runner checks the antigravity quota and runs an agy card on wb
 (`deepseek-v4.1-flash`) only while its 5h or 7d window is full; the summary's `executor:` line says `→ wb` when it fell
 back. `on` → agy cards always on wb; `off` → always agy. Write it only when the user says so in chat, and say which it
@@ -51,7 +51,7 @@ other codex model → ask, stating the concrete job. agy's model is fixed (`anti
 - `/orch` → ask the user which other executor to use, naming the job. Claude still doesn't implement.
 
 **Reviewer out of quota.** Reviews run only on codex. Quota full when the review starts, or quota text when it dies →
-the runner ends `review_pending` (no wb, no Claude substitute). The reviewer is always sol. On `review_pending`: do not replace the conformance review with a Claude line-by-line read. Accept
+the runner ends `review_pending` (no wb, no Claude substitute). The reviewer is always sol unless `--reviewer wb` (below). On `review_pending`: do not replace the conformance review with a Claude line-by-line read. Accept
 provisionally as `review pending` (in `## Acceptance` and the project log), and run the codex review when
 quota returns. High risk: may be committed but marked `unreviewed`; its numbers don't go into the paper
 until the review passes.
@@ -82,7 +82,9 @@ Three layers:
    syntax self-check on what it changed; manual fallback: the executor runs the Check). Always.
 2. **Conformance review** — diff against the card (steps followed, no files outside the card, no copied
    code, no junk files). Done by a read-only codex session, never by Claude: always `gpt-6.1-sol` (sole review gate,
-   ADR-0003), medium and high risk; when sol executed, a *fresh* session. The runner hands the reviewer the list of
+   ADR-0003), medium and high risk; when sol executed, a *fresh* session. `--reviewer wb` (state key `reviewer`, default `sol`)
+   is for the Codex-orchestrated setup, [codex/SKILL.md](codex/SKILL.md): the review and the high-risk plan review run on wb
+   read-only (CodeBuddy without write tools; a reviewer that changes the repo ends `review_error`), with no codex quota check. The runner hands the reviewer the list of
    files the task changed; the reviewer does not judge file scope.
    **Audit**: after 4–5 accepted cards on the same module, run a read-only whole-repo sol audit (`/rv` 整体) and backfill
    each real finding into the K missed of the card that introduced it — a diff review never sees cross-card design bugs.

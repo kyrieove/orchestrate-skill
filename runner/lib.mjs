@@ -9,6 +9,20 @@ export const q = (s) => "'" + String(s).replaceAll("'", "'\\''") + "'";
 export const WB_MODEL = "deepseek-v4.1-flash";
 export const wbCmd = (prompt, extra = "", model = WB_MODEL) => `codebuddy -p ${q(prompt)} --model ${model} --effort high -y${extra}`;
 
+// A read-only wb session (--reviewer wb): no write tools; the runner also checks that the repo did not change.
+export const WB_READONLY = ` --output-format stream-json --tools "Read,Grep,Glob,Bash" --disallowedTools "Edit Write MultiEdit NotebookEdit"`;
+
+// The reply of a stream-json run: the last {"type":"result"} line, or null.
+export function wbReply(streamFile) {
+  let text = "";
+  try { text = fs.readFileSync(streamFile, "utf8"); } catch { return null; }
+  const lines = text.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try { const o = JSON.parse(lines[i]); if (o.type === "result") return o.result ?? ""; } catch {}
+  }
+  return null;
+}
+
 // agy cards run on CodeBuddy too, on Gemini through magpie's gateway (the account magpie has signed in to Antigravity),
 // so their quota is separate from the one agy.exe / the desktop app share. Needs the model exposed to CodeBuddy:
 // `magpie "CodeBuddy Code" antigravity/gemini-3.8-flash`.

@@ -88,6 +88,21 @@ export function snapshot(repoAbs, isGit) {
   return result;
 }
 
+// A read-only session must leave the repo as it was: snapshot + HEAD before, changedSince() after.
+export function watch(repoAbs, isGit) {
+  const head = isGit ? spawnSync("git", ["-C", repoAbs, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim() : "";
+  return { head, snap: snapshot(repoAbs, isGit) };
+}
+
+// Changed paths (task docs, docs/orch/**, excluded), plus "HEAD" when a commit was made.
+export function changedSince(prev, repoAbs, isGit) {
+  const now = watch(repoAbs, isGit);
+  const paths = [...new Set([...Object.keys(prev.snap), ...Object.keys(now.snap)])]
+    .filter((p) => !exemptTaskPath.test(p) && JSON.stringify(prev.snap[p] ?? null) !== JSON.stringify(now.snap[p] ?? null));
+  if (now.head !== prev.head) paths.push("HEAD");
+  return paths.sort();
+}
+
 export function statTree(paths, { normLiveDir, cardDirNorm }) {
   const result = {};
   const seenDirs = new Set();

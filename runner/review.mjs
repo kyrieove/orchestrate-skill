@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
-import { q, runBash, quotaOf } from "./lib.mjs";
+import { q, runBash, quotaOf, wbCmd, WB_MODEL, WB_READONLY, wbReply } from "./lib.mjs";
+import { watch, changedSince } from "./snapshot.mjs";
 
 export async function runReviewOnly(args, { stateDir, liveDir }) {
   if (typeof args.name !== "string" || !/^[\w.-]+$/.test(args.name)) {
@@ -22,7 +23,7 @@ export async function runReviewOnly(args, { stateDir, liveDir }) {
   await runReview({ args, executor: state.executor, risk: state.risk, state, save,
     isGit: state.git !== false, cardAbs: state.card, liveDir, name: state.name, repoAbs: state.repo, taskDir, remainingMin: () => 30 });
   state.reviewOnly = { verdict: state.review.verdict, at: new Date().toISOString() };
-  if (!["out_of_scope", "review_error", "review_pending"].includes(outcome) || !["PASS", "FAIL"].includes(state.review.verdict)) state.outcome = outcome;
+  if (!state.review.mutated && (!["out_of_scope", "review_error", "review_pending"].includes(outcome) || !["PASS", "FAIL"].includes(state.review.verdict))) state.outcome = outcome;
   state.stage = "done";
   save(state);
   console.log(`ORCH-RUNNER ${state.name} outcome=${state.outcome} risk=${state.risk}\nreview: ${state.review.model} ${state.review.verdict}\nreview file: ${path.join(path.dirname(state.card), "review.md")}`);
@@ -46,11 +47,13 @@ export async function runReview(ctx) {
   } = ctx;
 
   state.stage = "reviewing";
-  const reviewer = "gpt-6.1-sol"; // sol is the only review gate (ADR-0003)
+  // sol is the review gate (ADR-0003); --reviewer wb (orchestrate-codex, where Codex is the orchestrator) uses wb read-only.
+  const viaWb = state.reviewer === "wb";
+  const reviewer = viaWb ? WB_MODEL : "gpt-6.1-sol";
 
   state.review = { model: reviewer, verdict: null };
 
-  if (quotaOf("codex")?.full) {
+  if (!viaWb && quotaOf("codex")?.full) {
     state.outcome = "review_pending";
     state.review.verdict = "pending";
     state.review.reason = "codex quota used up";
@@ -90,11 +93,25 @@ export async function runReview(ctx) {
     let reviewCmd;
     if (process.env.ORCH_RUNNER_FAKE_REVIEW) {
       reviewCmd = `{\n${process.env.ORCH_RUNNER_FAKE_REVIEW}\n} ${redir} ${q(reviewStream)} 2>&1`;
+    } else if (viaWb) {
+      reviewCmd = `{ echo '{"model":"${reviewer}"}'; ${wbCmd(reviewPrompt, WB_READONLY)} < /dev/null; } ${redir} ${q(reviewStream)} 2>&1`;
     } else {
       reviewCmd = `{ echo '{"model":"${reviewer}"}'; codex exec${skipGitFlag} -s read-only -m ${reviewer} -c model_reasoning_effort=medium -C ${q(repoAbs)} -o ${q(reviewMdAbs)} --json ${q(reviewPrompt)} < /dev/null; } ${redir} ${q(reviewStream)} 2>&1`;
     }
 
+    const before = viaWb ? watch(repoAbs, isGit) : null;
     const reviewRes = await runBash(reviewCmd, { cwd: repoAbs, timeoutMin: remainingMin(), exitPath: reviewExit });
+
+    // The reviewer must not have touched the repo (task docs are exempt); checked before its status is read, timeout included.
+    const changed = viaWb ? changedSince(before, repoAbs, isGit) : [];
+    if (changed.length) {
+      state.outcome = "review_error";
+      state.review.verdict = "error";
+      state.review.reason = `reviewer changed files: ${changed.join(", ")}`;
+      state.review.mutated = true;
+      save(state);
+      break;
+    }
 
     if (reviewRes.timedOut) {
       state.outcome = "interrupted";
@@ -108,7 +125,7 @@ export async function runReview(ctx) {
         // Tail only: the reviewer's own text earlier in the stream can mention "quota".
         try { streamText = fs.readFileSync(reviewStream, "utf8").slice(-2000); } catch {}
       }
-      if (/usage limit|quota|rate.?limit|\b429\b/i.test(streamText)) {
+      if (!viaWb && /usage limit|quota|rate.?limit|\b429\b/i.test(streamText)) {
         state.outcome = "review_pending";
         state.review.verdict = "pending";
         state.review.reason = "codex quota used up";
@@ -118,6 +135,13 @@ export async function runReview(ctx) {
       }
       save(state);
       break;
+    }
+
+    if (viaWb) {
+      // review.md is the runner's copy of the stream's result line; anything the reviewer wrote there itself is not a verdict.
+      const reply = wbReply(reviewStream);
+      if (reply !== null) fs.writeFileSync(reviewMdAbs, reply, "utf8");
+      else fs.rmSync(reviewMdAbs, { force: true });
     }
 
     let firstLine = "";
