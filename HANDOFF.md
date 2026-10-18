@@ -118,3 +118,4 @@ run-card.mjs 仍有 677 行（目标 600），剩下是参数/状态初始化和
 1. 这台机器的 `python3` 是 Windows 商店占位程序，用 `python`。
 2. codex 和 codebuddy 都要 `< /dev/null`；结果在 stream 里 `"type":"result"` 那行（agy.exe 的 `"event":"result"` 已不用）。
 3. Bash 后台任务 2 h 被杀：runner 默认超时 100 min。
+4. `node runner/test-run-card.mjs` 超过 2 分钟：后台跑。pre-commit hook 只在本机 `.git/hooks/`，CI 是 `.github/workflows/test.yml`。
