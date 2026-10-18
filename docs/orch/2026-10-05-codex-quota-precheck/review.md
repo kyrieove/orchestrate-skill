@@ -1,0 +1,7 @@
+VERDICT: PASS
+
+Findings: none. The diff matches the card exactly — precheck placed right after the `--reviewer` block (`runner/run-card.mjs:124-145`), the `needsCodex` expression is verbatim (`run-card.mjs:125`), script via `process.execPath` with `timeout: 45000` and `ORCH_QUOTA_SCRIPT` → `D:/2/dev/token-weather-quotas/hooks/quota.mjs` default (`run-card.mjs:127,130`), `>= 100` on either window with the full window's `resetMs` under `zh-CN`/`hour12:false` (`run-card.mjs:135-139`), the exact stderr line (byte-compared against the card), `exit 2`, and every missing/non-zero/timeout/unparsable path falling through silently. Test changes match step 2 (`baseEnv` gets `${tempLive}/no-quota.mjs`, `test-run-card.mjs:82`), step 3 (Case Q after Case Z, same `readState` state path, fallback-on Q2 asserting exit 0, temp file removed, `passedCount++`), and the 26→27 count in all three places.
+
+Bloat: none. It reuses the existing `codexFallback` import rather than re-reading the fallback file, uses only stdlib (`fs`, `spawnSync`, `JSON.parse`, `Date`), and Case Q reuses `resetRepo`/`writeCard`/`runCard`; no dead code, single-use abstraction, or unrequested options.
+
+Pre-existing: `docs/orch/2026-10-05-codex-quota-precheck/card.md` was already uncommitted before this task and is untouched by this diff; all pre-existing test cases spread `baseEnv`, so none runs the real quota script.

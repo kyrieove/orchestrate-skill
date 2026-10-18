@@ -1,82 +1,314 @@
 ---
 name: orchestrate
-description: Claude plans and accepts; agy executes a detailed task card; codex reviews once. Use whenever the user says Claude should plan/review but not implement, says 分工, 派活, 编排, orchestrate, /orch, 让 agy 干, 交给 agy/codex, or starts a feature, fix, refactor, analysis or batch job in a project whose HANDOFF.md says "Claude plans and reviews".
+description: Claude plans and accepts; agy or codex executes a detailed task card; review is tiered by risk. Five commands — /orch (Claude picks the executor), /agy, /luna, /sol, /wb (fixed executor). Use whenever the user says Claude should plan/review but not implement, says 分工, 派活, 编排, orchestrate, /orch, /agy, /luna, /sol, /wb, 让 agy 干, 让 wb 干, 让 luna 干, 让 sol 干, 交给 agy/codex, or starts a feature, fix, refactor, analysis or batch job in a project whose HANDOFF.md says "Claude plans and reviews".
 ---
 
-# orchestrate — Claude plans, agy executes, codex reviews once
+# orchestrate — Claude is the brain, agy and codex are the hands
 
-**Why this shape.** agy following explicit steps is fast and cheap. agy *figuring things out* — reading
-large files, designing, re-running whole test suites, reworking after strict reviews — costs tens of
-times more (measured 2026-10-01: a goal-only card burned 2.2 M fresh + 18 M cached input tokens).
-So the design work stays with Claude: the card says exactly what to do, agy does it, codex checks it
-once, Claude accepts. Claude never writes the implementation itself.
+Dates, incidents and measured costs behind these rules: [LESSONS.md](LESSONS.md).
+
+**Why this shape.** Executors following explicit steps are fast and cheap. Executors *figuring things
+out* — reading large files, designing, re-running whole test suites, reworking after strict reviews —
+cost tens of times more. So design stays with Claude and the card says exactly what to do.
+
+**Who writes.** Dispatch costs Claude 3–5k output tokens (card, dispatch, acceptance). Claude writes directly when that is cheaper and needs no design hand-off: small edits, and
+self-contained helpers it can write in one go (e.g. the 25-line `ledger.mjs`). Anything coupled to existing code,
+long, or needing a test loop is dispatched. Not in fixed modes (`/agy`, `/luna`, `/sol`) or when the user asked
+Claude not to implement. The user sends other small jobs to `/son5`.
+
+## Modes (executor is set by the command)
+
+| Command | Executor | Use for |
+|---|---|---|
+| `/orch` (default) | all code, including new algorithms and ports → the code worker (Claude picks, see below); Claude picks the rest: lookups, citation checks, bulk fact extraction → luna; sol executes only when the code worker failed the same card after 2 fixes (ask the user first, naming the job) | user didn't choose |
+| `/agy` | agy | fixed |
+| `/luna` | codex `gpt-6-luna` | fixed |
+| `/sol` | codex `gpt-6.1-sol` | fixed |
+| `/wb` | CodeBuddy CLI (WorkBuddy account) `deepseek-v4.1-flash` high | fixed |
+
+`agy` runs on CodeBuddy CLI too, model `antigravity/gemini-3.8-flash` through magpie's gateway: the Antigravity account magpie
+signed in to (kyriedrewove), independent of the agy.exe / desktop account (kyrieove). Not agy.exe any more (2026-10-17, user).
+
+**Code worker** (Claude picks, never asks the user): agy by default; wb when the card runs in parallel next to an agy card
+(ADR-0003: one each), or when agy failed the same card. Say the pick and the reason in one line when dispatching.
+Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its misses.
+
+**wb is agy's fallback, never a reviewer** (user), except under `--reviewer wb` (below). Switch `D:/2/dev/orch-runner/orchestrate/agy-fallback`:
+`auto` (default, also when missing) → at dispatch the runner checks the antigravity quota and runs an agy card on wb
+(`deepseek-v4.1-flash`) only while its 5h or 7d window is full; the summary's `executor:` line says `→ wb` when it fell
+back. `on` → agy cards always on wb; `off` → always agy. Write it only when the user says so in chat, and say which it
+is now. luna and sol never fall back: codex quota full → the runner exits 2 (`codex quota used up`) → tell the user.
+Always flash, never another DeepSeek model (user).
+
+Natural language: naming one executor ("让 / 交给 / 只让 agy|luna|sol|wb 干") → that fixed mode; "交给 codex"
+without a model → `/orch`, choosing luna; plain 派活 / 分工 / 编排 → `/orch`. A slash
+command beats wording inside its arguments (say so in one line if they conflict). Empty arguments → the
+task in progress; none → ask in one line. luna and sol need no permission prompt (user); any
+other codex model → ask, stating the concrete job. agy's model is fixed (`antigravity/gemini-3.8-flash`).
+
+**Executor fails** (agy 429 / RESOURCE_EXHAUSTED / quota text, codex unreachable):
+- fixed modes (`/agy`, `/luna`, `/sol`, `/wb`) → stop and tell the user; never switch executor on your own.
+- `/orch` → ask the user which other executor to use, naming the job. Claude still doesn't implement.
+
+**Reviewer out of quota.** Reviews run only on codex. Quota full when the review starts, or quota text when it dies →
+the runner ends `review_pending` (no wb, no Claude substitute). The reviewer is always sol unless `--reviewer wb` (below). On `review_pending`: do not replace the conformance review with a Claude line-by-line read. Accept
+provisionally as `review pending` (in `## Acceptance` and the project log), and run the codex review when
+quota returns. High risk: may be committed but marked `unreviewed`; its numbers don't go into the paper
+until the review passes.
+
+## Parallel cards — `--isolation worktree`
+
+Independent cards of one task (no card needs another's output) may run at once, at most 2, one on agy and one on wb
+(ADR-0003). Dispatch each as its own background `run-card.mjs` and add `--isolation worktree`; without it the single-card
+flow is unchanged. Needs a git repo; a project whose code is git-ignored has nothing in a worktree, so run those serially.
+- The runner refuses to dispatch (exit 2, `isolation refused: …`) when the card's may-change paths overlap a running card's
+  may-change or read-only paths, when 2 isolated cards already run, or when the main tree has uncommitted changes in the
+  card's may-change paths. Commit or stash first, or wait for the other card.
+- The card runs in `~/.claude/agent-live/orch-runner/wt/<name>` on branch `orch/<name>` (from HEAD at dispatch). The state's
+  `card` and `repo` are the worktree's: edit `## Acceptance` and `## Fix N` in that card copy. `--fix N` continues in the same worktree.
+- Optional `## Setup` (a fenced block or one backticked command) runs in the worktree before the baseline Check, for what a
+  worktree lacks: ignored or untracked files. Data paths: absolute paths in the main tree, listed read-only. A failing Setup ends
+  `setup_failed` (exit 2). The Check also runs on the main tree after the merge, so it must not depend on what Setup created.
+- Accept cards one at a time as they finish. `--commit` commits on the worktree branch, cherry-picks it onto the main tree's
+  current branch (the worktree and branch are then removed), and runs `--recheck` on the main tree, which is where the other
+  card's work now is. A cherry-pick conflict stops with exit 1 and keeps the worktree and branch: resolve by hand and tell the user.
+  High risk: Claude's independent recompute runs on the main tree after the merge.
+- Both sol reviews may run at the same time; a full quota ends `review_pending` as usual.
+
+## Review — tiered by risk, same in every mode
+
+Three layers:
+1. **Check** — the card's Check command, run by `run-card.mjs` after the executor exits (the executor only runs a
+   syntax self-check on what it changed; manual fallback: the executor runs the Check). Always.
+2. **Conformance review** — diff against the card (steps followed, no files outside the card, no copied
+   code, no junk files). Done by a read-only codex session, never by Claude: always `gpt-6.1-sol` (sole review gate,
+   ADR-0003), medium and high risk; when sol executed, a *fresh* session. `--reviewer wb` (state key `reviewer`, default `sol`)
+   is for the Codex-orchestrated setup, [codex/SKILL.md](codex/SKILL.md): the review and the high-risk plan review run on wb
+   read-only (CodeBuddy without write tools; a reviewer that changes the repo ends `review_error`), with no codex quota check. The runner hands the reviewer the list of
+   files the task changed; the reviewer does not judge file scope.
+   **Audit**: after 4–5 accepted cards on the same module, run a read-only whole-repo sol audit (`/rv` 整体) and backfill
+   each real finding into the K missed of the card that introduced it — a diff review never sees cross-card design bugs.
+3. **Acceptance** — Claude only. Reads `review.md`, `git diff --stat`, the flagged hunks (`file:line`
+   from the review) and the product (open the figure, run the CLI, read the numbers). Not the full diff.
+
+**When a review is done** (user; an LLM review finds something new every round, so "no findings" is
+never the stop signal). Every finding carries [P0]–[P3] and a code line that confirms it. Only P0/P1 (changes
+behaviour, a result or a Parameters value, breaks the Goal or Check) block acceptance; P2/P3 go into Acceptance as
+`deferred:` and are not fixed in this card. At most two review rounds per card: the first review, then one look at the
+fix diff only — never a fresh full review. P0/P1 still open after that → the user decides.
+
+Claude writes the tier into the card (`## Risk`). If a task fits several tiers, take the highest; if
+unsure, go one up. The dispatch line names the tier (`派发 agy · risk=high · 将重算 <X>`) so the user can
+override it.
+
+| Risk | Examples | Layers |
+|---|---|---|
+| low | docs, typos, figure cosmetics, ≤ 10 lines | 1 + Claude looks at `diff --stat` |
+| medium | ordinary code changes | 1 + 2 + 3 |
+| high | shared pipeline code that later runs depend on, data pipeline changes. **Not one-off analysis scripts** (a sensitivity run, a single recompute, one-off data processing): those go out at **medium** even when their numbers go into the paper — no plan review, one conformance review; the numbers are protected by Claude's independent recompute in layer 3, which Claude still does (user 2026-10-14: every review round finds something new, one-off scripts are not maintained code) | 1 + 2 + 3, and in 3 Claude **independently recomputes at least one key number from the raw data** (another method, e.g. per-subject means `lm` against the GLMM) and double-checks any too-good statistic (tiny SE, R² ≈ 1, tiny p with a small effect) |
+
+Lookup / literature / extraction tasks (any executor or subagent) usually produce no diff: skip layer 2;
+in layer 3 every claim the user's decision hinges on — usually 1–2 — Claude verifies once at the primary source (source code, PDF page) before it
+goes into a log or the paper.
+
+Why the high tier: a self-check or a conformance review cannot catch a wrong number; only an independent recompute does.
 
 ## Flow
 
 1. **Read just enough.** `grep -n` / `sed -n 'a,bp'` on the code the change touches. For a large
-   unfamiliar area, first send agy a read-only recon card ("summarise X: functions, call sites, data
-   flow, ≤ 40 lines") and plan from its summary.
-2. **Write the card** — `docs/orch/<yyyy-mm-dd>-<name>/card.md` in the project (sections below).
-   One task per card. Before dispatching, show the user the card when it writes to data folders or
+   unfamiliar area, first send a read-only recon card ("summarise X: functions, call sites, data
+   flow, ≤ 40 lines", dispatched with `--recon`) and plan from its summary.
+2. **Write the card** — `docs/orch/<yyyy-mm-dd>-<name>/card.md` in the project (sections below). Start from `D:/2/dev/orch-runner/orchestrate/card-template.md`.
+   One task per card. Show the user the card before dispatching when it writes to data folders or
    does anything irreversible; otherwise dispatch.
-3. **agy executes** (background + heartbeat, commands below). Tracked files must be clean first.
-4. **codex reviews once** — ask the user which model first (default `gpt-6.1-sol`). Skip the review
-   for docs, typos or changes ≤ 10 lines; Claude reads the diff instead.
-5. **Fix if needed.** Claude reads `review.md`, appends `## Fix 1` to the card (exact steps), agy runs
-   it again; Claude checks only that fix's diff — no second codex review. Max 2 fixes, then rewrite
-   the card.
-6. **Accept.** Run the check, `git diff --stat`, look at the product (open the figure, run the CLI).
-   Append `## Acceptance` to the card, commit (code + card + review), **don't push**. If the project
-   keeps a log (e.g. `docs/review-log.md`), add one line pointing at the card.
+3. **Dispatch through the runner** — one background Bash (`run_in_background`, `timeout` 7200000, cwd = repo), no heartbeat:
+   ```bash
+   node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --card <abs card.md> --name <name> --executor agy|luna|sol|wb --risk low|medium|high --repo <abs repo> # agent-live/<agy|codex>-<name>.jsonl agent-live/codex-review-<name>.jsonl agent-live/codex-plan-<name>.jsonl
+   ```
+   Keep the trailing comment with the literal stream paths: token-weather shows a lane only for paths spelled in the
+   command. The runner lints the card (exit 2 lists every problem, among them a may-change path inside a read-only path and a Check whose first word is an absolute path that does not exist; nothing has started; exit 2 with `codex quota used up` → codex quota full for a luna/sol executor or a high-risk card: tell the user), snapshots git status + content
+   hashes, runs the Check once as a baseline (summary `baseline check:`; red before the executor = not its fault), for high
+   risk runs a read-only sol plan review of the card (`PLAN: REVISE` stops before execution), runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
+   runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
+   prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
+   change is out of scope. `--exec-check`: the executor runs the card's Check itself (up to 3 attempts) before replying; the runner still re-runs it as the evidence. Recommended when the Check finishes in under 2 minutes; kept in the state file for `--fix N`. `--timeout-min` (default 100, the Bash job dies at 120). `--isolation worktree`: see **Parallel cards**. Not a git repo: works on a
+   size/mtime snapshot; `--commit` refuses. State: `~/.claude/agent-live/orch-runner/<name>.json`.
+   **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
+   run in the background with `node D:/2/dev/orch-runner/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`
+   (refuses an existing output dir unless `--resume`; default timeout 110 min; split longer runs into resumable parts;
+   a waiting executor re-reads its context on every poll).
+4. **Read the summary** (its first line is `ORCH-RUNNER <name> outcome=<outcome>`):
+
+   | outcome | next |
+   |---|---|
+   | `review_pass`, `passed_no_review`, `recon_done`, `fix_passed` | step 6 (low risk: also glance at `diff --stat`) |
+   | `review_fail` | check each finding at its `file:line`, then step 5 |
+   | `check_failed` | the summary has the Check's tail; step 5 |
+   | `out_of_scope` | 🛑 show the files, the user decides (never auto-revert); `junk:` paths are deleted only after the user says so in one line; false positive → add `- scope override: <reason>`, run `--recheck` and `--review-only`, then `--commit` |
+   | `readonly_violated` | 🛑 show the changed read-only paths to the user |
+   | `blocked`, `failed`, `interrupted` | read the reply / stream tail; executor failures follow **Executor fails** above |
+   | `review_pending` | codex quota ran out: **Reviewer out of quota** above |
+   | `plan_revise` | high risk only: sol's pre-execution plan review found a card problem (findings in the summary); nothing ran. First ask: is this a one-off analysis script? Then it should not have been high — fix only the P0/P1 findings and re-dispatch at medium. Otherwise fix the card and dispatch again. **A second `plan_revise` on the same card is the last round: never dispatch a third plan review** — the remaining findings go to the user |
+   | `plan_error` | the plan review produced no `PLAN:` line or died: read `codex-plan-<name>.jsonl`, fix the cause, dispatch again |
+   | `review_error` | read the tail of `codex-review-<name>.jsonl`: anything else (bad config, no VERDICT twice) → fix the cause and re-run the review — no provisional acceptance |
+5. **Fix.** A real finding whose fix is a few mechanical lines (a missing check, a wrong regex, a duplicate
+   declaration): Claude fixes it directly — except in fixed modes or when the user asked Claude not to implement
+   (same rule as **Who writes**) — runs `node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --recheck --name <name>` (the card's Check on
+   the current tree; `--commit` refuses files changed since the last Check, or a last Check that failed), and adds a
+   `- claude fix: <what>` line to Acceptance (`--commit` needs it to accept a `review_fail` / `check_failed` run) — an executor fix round is small. Anything larger: append `## Fix N` to the card (exact steps), then
+   `node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --fix N --fresh --name <name> # agent-live/<agy|codex>-<name>.jsonl` (card, repo, executor, risk come from the state file).
+   It runs the executor (`--fresh`: a new agy session; drop it to continue),
+   read-only guard, files check and Check, no second conformance review; the summary carries the fix diff, which is
+   all Claude reads. High risk: recompute the key number again. Max 2 fixes, then a new card in `<task>-v2/`.
+6. **Accept.** Turn `## Acceptance (draft)` into `## Acceptance`: replace the `TODO`s (verdict: accepted / review
+   pending / rejected; `review findings: N real / M false positive (scope S, card C, wrong W) / K missed`, with tier and reviewer; recompute result
+   for high risk); the files, Check and `tokens:` lines are already filled in. When the two TODOs are all that is left,
+   skip the edit: `--commit ... --accept accepted --findings "N real / M false positive (scope S, card C, wrong W) / K missed"` fills them and
+   commits in one call (the card is written only if every commit gate passes). Otherwise
+   `node D:/2/dev/orch-runner/orchestrate/runner/run-card.mjs --commit --name <name> --message "<msg>"` — it stages only the
+   card's files + card.md + review.md + reply.md (and appends to `docs/review-log.md` when the project has one), commits, prints the
+   hash; **don't push**. Commit messages end with the attribution lines the session asks for.
+   When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
+   with where it was found and the fix commit, then commit the card. After 10–15 cards, change the Modes table from
+   `node D:/2/dev/orch-runner/orchestrate/runner/stats.mjs` and the Acceptance rows, not from impressions (user).
+   Analysis logs follow the project's CLAUDE.md rules.
+7. **Hand over.** After step 6, if ctx_guard has reported > 250k, no background job is running, and ≥ 2 cards
+   remain: write the hand-over per `~/.agents/handoff-convention.md` (next step = card N), then tell the user one line:
+   `/clear`, then say「读 HANDOFF.md，从第 N 张卡继续」. Do not start a new session for this: the old session
+   would be woken (full context re-read) each time the new one ends a turn, and only 400 characters come back.
 
 ## Card sections (`card.md`)
 
 ```markdown
 # <name> — <one-line goal>
 ## Goal        what is true when done, in observable terms
-## Files       may change: … / read-only: … (data folders always read-only)
-## Steps       numbered; per step: file → function → the exact behaviour change; code snippets
-               for anything fiddly (index math, time axes, regexes, API calls agy may get wrong)
-## Check       one command, the fastest existing test that proves the goal; add ONE small new test
+## Risk        low / medium / high (+ the key number Claude will recompute, for high); the first word must equal --risk
+## Parameters  every value the result depends on, with its expected value — analysis settings (windows, N,
+               exclusions, K range, weights, seeds), thresholds, paths, constants, config keys. The code asserts
+               each one; the reviewer checks them one by one. Omit only when nothing in the task has a value.
+## Files       may change: `a.py`, `dir/` … / read-only: `data/` … — every path in backticks (the runner reads them:
+               may-change paths bound the files check; read-only paths get a size/mtime guard). Data folders always read-only.
+               Git-ignored files are outside the files check: list an ignored path that matters as read-only.
+## Steps (N = k)  numbered 1..N, the total in the heading; per step: file → function → the exact behaviour change; code snippets
+               for anything fiddly (index math, time axes, regexes, API calls the executor may get wrong)
+               When a step adds a check or invariant, list every path that can bypass it (cache hit, early
+               return, fallback, retry) and say how each one is covered.## Check       one command in backticks (or a fenced block), the fastest existing test that proves the goal; add ONE small new test
                only for a bug with a crisp repro, and spell it out here
-## Don't       no commits, no other files, no refactors beyond the steps, reuse helper X instead of copying
+## Expect      optional. `green` = a refactor: the Check is meant to pass before the change too (no baseline WARNING).
+               Otherwise the runner prints WARNING when the Check already passes before the change: add a test that fails on the old code.
+## Don't       no commits, no other files, no refactors beyond the steps, reuse helper X instead of copying; and always:
+               "Run scripts in the foreground and wait; before replying, stop any background task still running."
+               "Reuse existing functions; don't copy existing logic." "No rm, no git push, no git checkout . / restore . / reset --hard."
 ```
 
-Later sections appended in the same file: `## Fix 1`, `## Fix 2`, `## Acceptance` (verdict, files,
-check result, commit hash). Each task folder holds only `card.md` and `review.md`.
+Later sections appended in the same file: `## Fix 1`, `## Fix 2`, `## Acceptance`. Each task folder
+holds only `card.md`, `review.md` and `reply.md` (the executor's full reply). The runner refuses a card missing Goal / Risk / Files / Check / Steps (N = k) /
+Don't or the three quoted Don't sentences (recon cards may omit Check).
 
-## Commands
+### Research data outside git (input read-only, output isolated)
 
-agy (model fixed; `-p` ignores stdin, so it reads the card from disk):
+When the task reads raw data or writes results into an untracked folder, the card must also say:
+- raw data directories are read-only: no delete, move, rename or in-place overwrite;
+- the output directory must not exist at the first start; if it does, stop — never clear or reuse it. A resume
+  reuses it only after the script checks its own saved run parameters (e.g. `run_params.json`) match;
+- temp files, logs and results all stay in the output directory;
+- compare the raw-file list, sizes and mtimes before and after; any difference = failure, stop;
+- **checkpoint / resume** (user's hard requirement): any script expected to run > 10 min
+  saves results in batches, skips finished batches on restart, skips if the final output exists; each
+  batch's seed depends only on its batch number so a resumed run is bit-identical to an uninterrupted
+  one; prove it with a small trial (run straight through vs stop once and resume). Batch size: an
+  interruption loses at most ~10 min.
+- fix rounds may modify only files this task created in that output directory; replaced results are
+  renamed with suffix `_SUPERSEDED_<reason>`, not deleted, and the report gets a version line on top.
+
+## Manual fallback (runner missing or broken)
+
+Same flow by hand; the executor runs the Check. Steps 1–2 above stay.
+
+3. **Snapshot.** Save `git status --short` as *before* (outside git: the file list with sizes and mtimes
+   of the folders the card may touch). Existing changes belong to the
+   user — the executor must not overwrite them.
+4. **Execute** (background, no heartbeat; commands below). **Long runs (> 10 min of computing):** the executor
+   writes the script and runs the pilot only; Claude starts the full run as a background Bash job (0 tokens while it
+   computes; a waiting executor re-reads its context on every poll).
+   Command (literal paths, so the lane `脚本 <name>` shows; the `.exit` file turns it done/failed):
+   `python <script> 2>&1 | tee ~/.claude/agent-live/run-<name>.jsonl; echo ${PIPESTATUS[0]} > ~/.claude/agent-live/run-<name>.exit`
+   — the script appends `k/N 已完成：… · 正在：…` to `~/.claude/agent-live/run-<name>.progress` after each checkpoint.
+   A Bash job is killed at 2 h: split longer runs into resumable parts.
+5. **Touched files.** Take the snapshot again as *after*. Exempt: everything under `docs/orch/`. Any other touched file not in the card's `## Files` → 🛑 stop, show it, let the user decide
+   (never auto-revert). Obvious junk (`__pycache__`, `*.log`, `tmp*`) is deleted only after the user says so
+   in one line.
+6. **Review** per the risk tier.
+7. **Fix if needed.** Append `## Fix 1` to the card (exact steps) and re-run the **same** executor with
+   a fresh agy call (CodeBuddy has no `--conversation`); codex executors get a fresh `codex exec` with "carry out ## Fix N of <card>". Claude reads
+   only that fix's diff (it is small) — no second conformance review; high risk: recompute the key number
+   again. Max 2 fixes, then write a new card in `<task>-v2/` and keep the old folder. A `review.md` without a
+   first-line VERDICT counts as FAIL: re-run the review once.
+8. **Accept.** Append `## Acceptance` to the card (verdict: accepted / review pending / rejected, files, check result, recompute result for
+   high risk, commit hash, and two ledger lines below), commit code + card + review, **don't push**.
+   - `tokens:` the output of `node D:/2/dev/orch-runner/orchestrate/ledger.mjs <name>` (one row per executor and reviewer run),
+     taken before any same-name dispatch clears the streams; fix rounds add their own row.
+   - `review findings:` N real / M false positive (scope S, card C, wrong W) / K missed (a bug found later by Claude or a later review), with tier and reviewer.
+     False positives by cause: `scope` = the file was not this card's, `card` = the card was wrong, `wrong` = the reviewer misread the code; S + C + W = M, and the split may be left out only when M is 0.
+     When a bug in an accepted card's code turns up later (user test, ocr, another review), add it to that card's K missed
+     with where it was found and the fix commit, then commit the card. Long runs get the same two lines (the run itself adds no executor row).
+   After 10–15 cards, change the Modes table from these rows, not from impressions (user).
+   If the project keeps a code log (e.g. `docs/review-log.md`), add one line pointing at the card. Analysis logs follow the
+   project's CLAUDE.md rules.
+
+## Commands (manual fallback)
+
+Run `mkdir -p ~/.claude/agent-live` once first. Before every dispatch create `T=$(mktemp -d)` (used by the
+commands). Only at a card's first dispatch, clear same-name leftovers:
+`rm -f ~/.claude/agent-live/{agy,codex,codex-review,run}-<name>.{jsonl,progress,exit}` — later dispatches (review,
+fixes) must not, or the ledger loses the earlier rows; a re-run of the same role first saves its ledger row.
+
+Progress line — append to every executor instruction: "after starting, append `0/N 已完成：无 · 正在：<第1步>`, and after finishing each step append `k/N 已完成：X · 正在：Y` (Chinese; Y says in plain words what is being done now and how far along it is, 30–50 characters, no function names needed, e.g. `2/5 已完成：读 README · 正在：给 README 加额度说明，开头两段已写好，还差示例和截图`), as a new line, in UTF-8 (PowerShell: Add-Content -Encoding utf8), to <abs ~/.claude/agent-live/<agy|codex>-<name>.progress>. Just append; do not open, list or inspect that directory or any other file to learn the format." The last sentence matters: without it, agy explores `agent-live/` for a 1-line edit. The token-weather mod shows it as the lane progress bar, only in the session whose Bash command spells out the `agent-live/<name>.jsonl` path literally (no shell variables in the name). The lane crops the line's end on a narrow screen, so keep X short and put any changing count first in Y (`正在：T-AAHC交叉验证 76/100（k-means 已完）`, not `正在：交叉验证 k-means 72/72 · T-AAHC 76/100`): a count at the end gets cropped and the lane looks frozen. A sub-step counter Claude writes itself (a silent background loop appending to the same `.progress`) follows the same rule.
+
+**agy** (model fixed; `-p` ignores stdin, so it reads the card from disk):
 
 ```bash
-T=$(mktemp -d); C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p "Read <abs card.md> and carry out every step exactly; run only the Check command; do not commit. Reply with: files changed, check result, anything you could not do." --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format json > $T/agy.json 2>&1; echo done > $T/done; echo $T
+C:/Users/ASUS/AppData/Local/agy/bin/agy.exe -p "Read <abs card.md> and carry out every step exactly; run only the commands the Steps and the Check name; do not commit. Reply with: files changed, check result, anything you could not do. <progress line>" --model gemini-3.8-flash-high --dangerously-skip-permissions --output-format stream-json 2>&1 | tee ~/.claude/agent-live/agy-<name>.jsonl > $T/agy.jsonl; echo ${PIPESTATUS[0]} > ~/.claude/agent-live/agy-<name>.exit; echo done > $T/done
 ```
 
-Run it with `run_in_background`, cwd = repo. In the same message arm a Monitor heartbeat
-(`timeout_ms` 1800000, re-arm while running):
+Fix rounds add `--conversation <conversation_id>`. agy's reply and `conversation_id` are in the last
+line of `$T/agy.jsonl` (`"event":"result"`, fields under `.result`): read it with `tail -n 1`, never the
+whole file. If the last line is not a result (crash, killed), read the last few lines for the cause.
+`--dangerously-skip-permissions` is per call; never edit `~/.gemini/config/config.json`.
+
+**codex executes** (`/luna`, `/sol`, or `/orch` picking codex):
 
 ```bash
-s=$(date +%s); until [ -f <T>/done ]; do sleep 300; [ -f <T>/done ] || echo "agy 仍在执行 <name>，已 $(( ($(date +%s)-s)/60 )) 分钟"; done
+{ echo '{"model":"<model>"}'; codex exec --approve-for-me -m <model> -C <repo> --json "Read <abs card.md> and carry out every step exactly; run only the commands the Steps and the Check name; do not commit. Reply with: files changed, check result, anything you could not do. <progress line>" < /dev/null; } > ~/.claude/agent-live/codex-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-<name>.exit; echo done > $T/done
 ```
 
-(Create `T` yourself first with `mktemp -d` so both commands know it.) Tell the user one line on
-every event: dispatch, each heartbeat, done, review done, fix dispatched, accepted. Never run an
-executor in the foreground — a Bash call over 10 min is cut off and the conversation goes silent.
+(no `-s` with `--approve-for-me`; outside git add `--skip-git-repo-check`, review against the file snapshot, and write
+`commit: n/a` in Acceptance). `< /dev/null` is required: with stdin left open codex prints "Reading additional input from stdin..." and hangs. The first line names the lane (`GPT-6 Luna` / `GPT-6.1 Sol`).
 
-codex review (read-only; ask the model first):
+**codex conformance review** (read-only; `<reviewer>` is always `gpt-6.1-sol`, fresh session):
 
 ```bash
-codex exec -s read-only -m <model> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md "Review the working-tree changes against <abs card.md>. Run git status and git diff (include untracked files the card creates). Do not modify or create files. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 10 findings, each with file:line, the problem and the fix — wrong behaviour, steps not followed, files outside the card, copied code, junk files."
+{ echo '{"model":"<reviewer>"}'; codex exec -s read-only -m <reviewer> -c model_reasoning_effort=medium -C <repo> -o <task dir>/review.md --json "Review the changes against <abs card.md>. The runner found that the task changed exactly these files: <touched files>. Review only these files; file scope was already checked by the runner, so do not judge it. Run git diff for them (read untracked files the card creates); read the card and the code the changes touch. Do not run tests or scripts (the Check was already run) and do not modify or create files. card.md and review.md under docs/orch/<task>/ are always allowed. These files already had uncommitted changes before this task: <paths from the before snapshot>. Those earlier changes are not part of it, but review any further change this task made in them. Report only problems this diff introduces; list pre-existing problems in one line at the end, outside the verdict. No style or naming remarks. If a finding is one instance of a whole class of bug, name the class and use grep to list every occurrence. Reply: first line exactly VERDICT: PASS or VERDICT: FAIL, then at most 5 findings, most severe first, each starting with a priority tag, then file:line, the problem, the fix and the code line that confirms it (read it; drop any finding you cannot confirm in the code) — wrong behaviour, a Parameters value not matching the card, a bypassed check, steps not followed, copied code, junk files. Priority: [P0]/[P1] = changes behaviour, a computed result or a Parameters value, breaks the card's Goal or Check, bypasses a check, or skips a step; [P2]/[P3] = everything else. VERDICT: FAIL only when at least one [P0] or [P1] finding exists." < /dev/null; } > ~/.claude/agent-live/codex-review-<name>.jsonl 2>&1; echo $? > ~/.claude/agent-live/codex-review-<name>.exit; echo done > $T/review.done
 ```
 
-agy out of quota (429 / RESOURCE_EXHAUSTED / quota text) → ask the user for a codex model and run the
-same card with `codex exec --approve-for-me -m <model> -C <repo> "<same instruction>"` (no `-s` with
-`--approve-for-me`). Claude still doesn't implement.
+**wb executes** (`/wb`, or an agy card while agy's quota is full): the codex exec command with
+`codebuddy` in place of `codex exec` — exec: `{ echo '{"model":"deepseek-v4.1-flash"}'; codebuddy -p "<same prompt>" --model deepseek-v4.1-flash --effort high -y --output-format stream-json < /dev/null; } > ~/.claude/agent-live/codex-<name>.jsonl 2>&1`.
+The reply is the `result` field of the last `{"type":"result"}` line.
+
+Fill `<paths from the before snapshot>` from step 3 (without it, sol counts the user's own earlier edits against the card). Run the review in the background too.
+
+**Background, no heartbeat.** Run the executor (and the review) with `run_in_background` and
+`timeout` 7200000, cwd = repo. Do **not** arm a Monitor heartbeat: every event wakes Claude for a full turn,
+which re-reads the whole context (tens of thousands of tokens late in a session) just to say "still running".
+The user watches progress in the token-weather lane at zero token cost; Claude is woken once, by the
+background task's completion notice.
+
+Tell the user one line on: dispatch, done, review done, fix dispatched, accepted — each naming the risk tier
+where relevant.
 
 ## Pitfalls
 
-- agy copies code instead of reusing it — name the helper to reuse in `## Don't`.
 - codex's sandbox can't write `~/.mne`: for MNE code put `_MNE_FAKE_HOME_DIR=<temp dir>` in the check.
 - Don't run agy inside codex (no sign-in there) or vice versa.
-- Executors leave junk files — `git status` at acceptance; delete them before committing.
+- Cost check: `node D:/2/dev/orch-runner/orchestrate/cost.mjs <transcript.jsonl>`.
+- Source locations: every runtime's installed `orchestrate-2` is a stub (`~/.skills-manager/skills/orchestrate-2/SKILL.md`) that reads this file, so edits here take effect everywhere with no sync; the live token-weather mod is `D:/2/dev/token-weather-quotas/hooks/token-weather.mjs` (the `~/.claude/plugins/cache/.../token-weather` copy is the old, disabled one).
