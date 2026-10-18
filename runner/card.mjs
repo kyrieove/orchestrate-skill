@@ -106,9 +106,12 @@ export function parseFiles(cardText) {
   };
 }
 
-export function extractCheck(cardText) {
-  const sec = getSection(cardText, "Check");
-  if (sec === null) return null;
+export const extractCheck = (cardText) => extractCommand(cardText, "Check");
+
+// The fenced block (or first backticked span) of a section; dropComments ignores <!-- --> (the template's hints).
+export function extractCommand(cardText, title, dropComments = false) {
+  const sec = dropComments ? getSection(cardText, title)?.replace(/<!--[\s\S]*?-->/g, "") : getSection(cardText, title);
+  if (sec === undefined || sec === null) return null;
   const fenced = sec.match(/```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)```/);
   if (fenced) return fenced[1].trim();
   return sec.match(/`([^`]+)`/)?.[1].trim() ?? null;

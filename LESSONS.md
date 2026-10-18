@@ -11,7 +11,7 @@ their own; read this file when a rule looks arbitrary, or to check whether it st
 ## Code worker and executor choice
 
 - 2026-10-04: sol spent 4.5 M tokens executing the Cartool port; a typical agy card costs 0.2–0.3 M. Why heavy work goes to the code worker, not sol.
-- 2026-10-05 (user): after 4 cards the user rated wb above agy. Why `/orch` asks which code worker to use.
+- 2026-10-05 (user): after 4 cards the user rated wb above agy. Why `/orch` once asked which code worker to use (from 2026-10-18 Claude picks and states the reason, ADR-0003).
 - 2026-10-06 (user): wb is agy's fallback only, never a reviewer; always flash, never another DeepSeek model.
 - 2026-10-01 (user): luna and sol need no permission prompt.
 

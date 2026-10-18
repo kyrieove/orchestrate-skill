@@ -2020,11 +2020,141 @@ No rm, no git push
     passedCount++;
   }
 
-  if (passedCount === 57) {
-    console.log("57/57 passed");
+
+  // ---- --isolation worktree (ADR-0003 parallel) ----
+  const parRepo = fs.mkdtempSync(path.join(os.tmpdir(), "orch-par-repo-")).replaceAll("\\", "/");
+  const parLive = fs.mkdtempSync(path.join(os.tmpdir(), "orch-par-live-")).replaceAll("\\", "/");
+  try {
+    const sh = (...a) => spawnSync("git", a, { cwd: parRepo, encoding: "utf8" });
+    sh("init"); sh("config", "user.name", "T"); sh("config", "user.email", "t@e.x");
+    for (const f of ["p1.txt", "p2.txt", "p3.txt"]) fs.writeFileSync(path.join(parRepo, f), "base\n", "utf8");
+    fs.mkdirSync(path.join(parRepo, "docs"));
+    fs.writeFileSync(path.join(parRepo, "docs/review-log.md"), "# log\n", "utf8");
+    sh("add", "."); sh("commit", "-m", "init");
+    const parEnv = { ...baseEnv, ORCH_RUNNER_LIVE_DIR: parLive };
+    fs.mkdirSync(path.join(parLive, "orch-runner"), { recursive: true });
+    const parState = (n) => JSON.parse(fs.readFileSync(path.join(parLive, "orch-runner", `${n}.json`), "utf8"));
+    const parCard = (n, may, { check = "true", setup = "", ro = "data/" } = {}) => {
+      const dir = path.join(parRepo, "docs/orch", n);
+      fs.mkdirSync(dir, { recursive: true });
+      const file = path.join(dir, "card.md").replaceAll("\\", "/");
+      fs.writeFileSync(file, `# ${n}\n\n## Goal\nx\n\n## Risk\nlow\n\n## Files\nmay change: ${may.map((m) => `\`${m}\``).join(", ")} / read-only: \`${ro}\`\n\n## Steps (N = 1)\n1. s\n\n${setup ? `## Setup\n\`\`\`\n${setup}\n\`\`\`\n\n` : ""}## Check\n\`${check}\`\n\n## Don't\nRun scripts in the foreground and wait\nReuse existing functions\nNo rm, no git push\n`, "utf8");
+      return file;
+    };
+    const dispatch = (n, card, exec, extra = []) => runCard(n, { env: { ...parEnv, ORCH_RUNNER_FAKE_EXEC: exec }, args: ["--card", card, "--repo", parRepo, "--isolation", "worktree", ...extra] });
+    const fakeRunning = (n, st) => fs.writeFileSync(path.join(parLive, "orch-runner", `${n}.json`), JSON.stringify({ name: n, repo: parRepo, stage: "executing", startedAt: new Date().toISOString(), mayChange: [], readOnlyPaths: [], ...st }), "utf8");
+
+    // Case P1: guards at dispatch.
+    {
+      const c1 = parCard("p1", ["p1.txt"], { check: "test -f p1.txt", setup: "echo s > setup.out" });
+      assert.strictEqual(dispatch("bad", c1, "true", ["--isolation", "tree"]).status, 2);
+      fakeRunning("run-a", { mayChange: ["docs/orch/zz/", "p1.txt"] });
+      let res = dispatch("p1", c1, "true");
+      assert.strictEqual(res.status, 2); assert.match(res.stderr, /overlap with running card 'run-a'/);
+      fakeRunning("run-a", { mayChange: ["other.txt"], readOnlyPaths: [path.join(parRepo, "p1.txt").replaceAll("\\", "/")] });
+      res = dispatch("p1", c1, "true");
+      assert.strictEqual(res.status, 2); assert.match(res.stderr, /overlap/, "may-change vs the other's read-only");
+      fakeRunning("run-a", { mayChange: ["a/"], isolation: { mainRepo: parRepo } });
+      fakeRunning("run-b", { mayChange: ["b/"], isolation: { mainRepo: parRepo } });
+      res = dispatch("p1", c1, "true");
+      assert.strictEqual(res.status, 2); assert.match(res.stderr, /at most 2/);
+      fs.rmSync(path.join(parLive, "orch-runner", "run-a.json")); fs.rmSync(path.join(parLive, "orch-runner", "run-b.json"));
+      fs.writeFileSync(path.join(parRepo, "p1.txt"), "dirty\n", "utf8");
+      res = dispatch("p1", c1, "true");
+      assert.strictEqual(res.status, 2); assert.match(res.stderr, /uncommitted changes in this card's may-change paths: p1.txt/);
+      sh("checkout", "--", "p1.txt");
+      const cf = parCard("pf", ["p1.txt"], { setup: "exit 3" });
+      res = dispatch("pf", cf, "true");
+      assert.strictEqual(res.status, 2); assert.strictEqual(parState("pf").outcome, "setup_failed");
+      assert.strictEqual(parState("pf").stage, "executing", "no executor ran");
+      fs.rmSync(path.join(parLive, "orch-runner", "pf.json"));
+      fs.rmSync(path.join(parRepo, "docs/orch/pf"), { recursive: true });
+      // a branch of the same name that holds commits is not replaced
+      sh("checkout", "-q", "-b", "orch/pr"); sh("commit", "-q", "--allow-empty", "-m", "unmerged"); sh("checkout", "-q", "-");
+      const cp = parCard("pr", ["p1.txt"]);
+      res = dispatch("pr", cp, "true");
+      assert.strictEqual(res.status, 2); assert.match(res.stderr, /holds commits/);
+      sh("branch", "-D", "orch/pr");
+      // the reservation is written at admission: a second card on the same path is refused before the first has run
+      const { startIsolation } = await import(new URL("./isolation.mjs", import.meta.url));
+      const sd = path.join(parLive, "orch-runner");
+      const t1 = startIsolation({ stateDir: sd, name: "r1", mainRepo: parRepo, mainCard: cp, cardText: fs.readFileSync(cp, "utf8") });
+      assert.ok(t1.info, t1.error);
+      const t2 = startIsolation({ stateDir: sd, name: "r2", mainRepo: parRepo, mainCard: cp, cardText: fs.readFileSync(cp, "utf8") });
+      assert.match(t2.error, /overlap with running card 'r1'/);
+      spawnSync("git", ["-C", parRepo, "worktree", "remove", "--force", t1.repo]); sh("branch", "-D", "orch/r1");
+      fs.rmSync(path.join(sd, "r1.json")); fs.rmSync(path.join(parRepo, "docs/orch/pr"), { recursive: true });
+      passedCount++;
+    }
+
+    // Case P2: two cards in worktrees at once; Setup ran; main tree untouched until --commit; fix goes back to the same worktree.
+    {
+      const c1 = path.join(parRepo, "docs/orch/p1/card.md").replaceAll("\\", "/"); // untracked in the main tree
+      const c2 = parCard("p2", ["p2.txt"]);
+      sh("add", "docs/orch/p2/card.md"); sh("commit", "-m", "card p2"); // tracked in the main tree
+      let res = dispatch("p1", c1, "echo one > p1.txt; echo 'STATUS: done'");
+      assert.strictEqual(res.status, 0, res.stderr);
+      res = dispatch("p2", c2, "echo two > p2.txt; echo 'STATUS: done'");
+      assert.strictEqual(res.status, 0, res.stderr);
+      const s1 = parState("p1"), s2 = parState("p2");
+      assert.strictEqual(s1.outcome, "passed_no_review");
+      assert.deepStrictEqual(s1.touched, ["p1.txt"], "Setup's setup.out is not touched");
+      assert.ok(s1.repo.startsWith(parLive) && fs.existsSync(path.join(s1.repo, "p1.txt")) && s1.card.startsWith(s1.repo));
+      assert.strictEqual(fs.readFileSync(path.join(s1.repo, "setup.out"), "utf8").trim(), "s", "Setup ran in the worktree");
+      assert.strictEqual(s1.isolation.branch, "orch/p1");
+      for (const f of ["p1.txt", "p2.txt"]) assert.strictEqual(fs.readFileSync(path.join(parRepo, f), "utf8").trim(), "base", "main tree untouched");
+      // fix: back to the worktree
+      fs.appendFileSync(s2.card, "\n## Fix 1\n1. again.\n", "utf8");
+      res = runCard("p2", { env: { ...parEnv, ORCH_RUNNER_FAKE_EXEC: "echo two2 > p2.txt; echo 'STATUS: done'" }, args: ["--fix", "1", "--card", s2.card, "--repo", s2.repo] });
+      assert.strictEqual(res.status, 0, res.stderr);
+      assert.strictEqual(parState("p2").outcome, "fix_passed");
+      assert.strictEqual(fs.readFileSync(path.join(s2.repo, "p2.txt"), "utf8").trim(), "two2");
+      assert.strictEqual(fs.readFileSync(path.join(parRepo, "p2.txt"), "utf8").trim(), "base");
+      const fnd = ["--accept", "accepted", "--findings", "0 real / 0 false positive / 0 missed"];
+      res = runCard("p1", { env: parEnv, args: ["--commit", "--message", "p1", ...fnd] });
+      assert.strictEqual(res.status, 0, res.stderr + res.stdout);
+      assert.match(res.stdout, /merged into .* as [0-9a-f]+/); assert.match(res.stdout, /recheck on the main tree: exit=0/);
+      assert.strictEqual(fs.readFileSync(path.join(parRepo, "p1.txt"), "utf8").trim(), "one");
+      assert.ok(!fs.existsSync(s1.repo), "worktree removed"); assert.strictEqual(sh("branch", "--list", "orch/p1").stdout.trim(), "");
+      assert.deepStrictEqual(sh("show", "--name-only", "--format=", "HEAD~1").stdout.trim().split(/\r?\n/).sort(), ["docs/orch/p1/card.md", "docs/orch/p1/reply.md", "p1.txt"]);
+      assert.ok(fs.readFileSync(path.join(parRepo, "docs/orch/p1/card.md"), "utf8").includes("## Acceptance"));
+      assert.strictEqual(sh("status", "--porcelain").stdout.trim(), "");
+      res = runCard("p2", { env: parEnv, args: ["--commit", "--message", "p2", ...fnd] });
+      assert.strictEqual(res.status, 0, res.stderr + res.stdout);
+      assert.strictEqual(fs.readFileSync(path.join(parRepo, "p2.txt"), "utf8").trim(), "two2");
+      assert.strictEqual(sh("status", "--porcelain").stdout.trim(), "");
+      assert.strictEqual(parState("p2").mergeCheck?.exit, 0);
+      const log = fs.readFileSync(path.join(parRepo, "docs/review-log.md"), "utf8");
+      assert.ok(/docs\/orch\/p1\/card\.md/.test(log) && /docs\/orch\/p2\/card\.md/.test(log), "review-log lines appended on the main tree");
+      passedCount++;
+    }
+
+    // Case P3: the cherry-pick conflicts -> exit 1, main tree clean, worktree and branch kept.
+    {
+      const c3 = parCard("p3", ["p3.txt"]); // stays untracked in the main tree
+      const card3 = fs.readFileSync(c3, "utf8");
+      let res = dispatch("p3", c3, "echo mine > p3.txt; echo 'STATUS: done'");
+      assert.strictEqual(res.status, 0, res.stderr);
+      fs.writeFileSync(path.join(parRepo, "p3.txt"), "theirs\n", "utf8");
+      sh("commit", "-am", "main moved");
+      res = runCard("p3", { env: parEnv, args: ["--commit", "--message", "p3", "--accept", "accepted", "--findings", "0 real / 0 false positive / 0 missed"] });
+      assert.strictEqual(res.status, 1); assert.match(res.stderr, /cherry-pick .* failed/);
+      assert.strictEqual(sh("status", "--porcelain").stdout.trim(), "?? docs/orch/p3/");
+      assert.strictEqual(fs.readFileSync(c3, "utf8"), card3, "the main tree's card is back as it was");
+      assert.strictEqual(fs.readFileSync(path.join(parRepo, "p3.txt"), "utf8").trim(), "theirs");
+      assert.ok(fs.existsSync(parState("p3").repo) && parState("p3").isolation.mergeError);
+      passedCount++;
+    }
+  } finally {
+    fs.rmSync(parRepo, { recursive: true, force: true });
+    fs.rmSync(parLive, { recursive: true, force: true });
+  }
+
+  if (passedCount === 60) {
+    console.log("60/60 passed");
     process.exitCode = 0;
   } else {
-    console.error(`Only ${passedCount}/57 passed`);
+    console.error(`Only ${passedCount}/60 passed`);
     process.exitCode = 1;
   }
 } finally {

@@ -20,7 +20,7 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 
 | Command | Executor | Use for |
 |---|---|---|
-| `/orch` (default) | all code, including new algorithms and ports → the code worker (asked, see below); Claude picks the rest: lookups, citation checks, bulk fact extraction → luna; sol executes only when the code worker failed the same card after 2 fixes (ask the user first, naming the job) | user didn't choose |
+| `/orch` (default) | all code, including new algorithms and ports → the code worker (Claude picks, see below); Claude picks the rest: lookups, citation checks, bulk fact extraction → luna; sol executes only when the code worker failed the same card after 2 fixes (ask the user first, naming the job) | user didn't choose |
 | `/agy` | agy | fixed |
 | `/luna` | codex `gpt-6-luna` | fixed |
 | `/sol` | codex `gpt-6.1-sol` | fixed |
@@ -29,7 +29,8 @@ Claude not to implement. The user sends other small jobs to `/son5`.
 `agy` runs on CodeBuddy CLI too, model `antigravity/gemini-3.8-flash` through magpie's gateway: the Antigravity account magpie
 signed in to (kyriedrewove), independent of the agy.exe / desktop account (kyrieove). Not agy.exe any more (2026-10-17, user).
 
-**Code worker** (user): before the first code card of every `/orch` task ask "写代码交给 agy 还是 wb？";
+**Code worker** (Claude picks, never asks the user): agy by default; wb when the card runs in parallel next to an agy card
+(ADR-0003: one each), or when agy failed the same card. Say the pick and the reason in one line when dispatching.
 Heavy work goes to the code worker, not sol: review layers 2 and 3 catch its misses.
 
 **wb is agy's fallback, never a reviewer** (user). Switch `D:/2/dev/orch-runner/orchestrate/agy-fallback`:
@@ -54,6 +55,25 @@ the runner ends `review_pending` (no wb, no Claude substitute). The reviewer is 
 provisionally as `review pending` (in `## Acceptance` and the project log), and run the codex review when
 quota returns. High risk: may be committed but marked `unreviewed`; its numbers don't go into the paper
 until the review passes.
+
+## Parallel cards — `--isolation worktree`
+
+Independent cards of one task (no card needs another's output) may run at once, at most 2, one on agy and one on wb
+(ADR-0003). Dispatch each as its own background `run-card.mjs` and add `--isolation worktree`; without it the single-card
+flow is unchanged. Needs a git repo; a project whose code is git-ignored has nothing in a worktree, so run those serially.
+- The runner refuses to dispatch (exit 2, `isolation refused: …`) when the card's may-change paths overlap a running card's
+  may-change or read-only paths, when 2 isolated cards already run, or when the main tree has uncommitted changes in the
+  card's may-change paths. Commit or stash first, or wait for the other card.
+- The card runs in `~/.claude/agent-live/orch-runner/wt/<name>` on branch `orch/<name>` (from HEAD at dispatch). The state's
+  `card` and `repo` are the worktree's: edit `## Acceptance` and `## Fix N` in that card copy. `--fix N` continues in the same worktree.
+- Optional `## Setup` (a fenced block or one backticked command) runs in the worktree before the baseline Check, for what a
+  worktree lacks: ignored or untracked files. Data paths: absolute paths in the main tree, listed read-only. A failing Setup ends
+  `setup_failed` (exit 2). The Check also runs on the main tree after the merge, so it must not depend on what Setup created.
+- Accept cards one at a time as they finish. `--commit` commits on the worktree branch, cherry-picks it onto the main tree's
+  current branch (the worktree and branch are then removed), and runs `--recheck` on the main tree, which is where the other
+  card's work now is. A cherry-pick conflict stops with exit 1 and keeps the worktree and branch: resolve by hand and tell the user.
+  High risk: Claude's independent recompute runs on the main tree after the merge.
+- Both sol reviews may run at the same time; a full quota ends `review_pending` as usual.
 
 ## Review — tiered by risk, same in every mode
 
@@ -109,7 +129,7 @@ Why the high tier: a self-check or a conformance review cannot catch a wrong num
    risk runs a read-only sol plan review of the card (`PLAN: REVISE` stops before execution), runs the executor, compares read-only paths, checks touched files against `## Files`, runs the Check itself,
    runs the review for the tier (Review section), runs `ledger.mjs`, appends `## Acceptance (draft)` on a pass, and
    prints one summary. Claude is woken once, by the completion notice. `--recon`: read-only card, no Check, any file
-   change is out of scope. `--exec-check`: the executor runs the card's Check itself (up to 3 attempts) before replying; the runner still re-runs it as the evidence. Recommended when the Check finishes in under 2 minutes; kept in the state file for `--fix N`. `--timeout-min` (default 100, the Bash job dies at 120). Not a git repo: works on a
+   change is out of scope. `--exec-check`: the executor runs the card's Check itself (up to 3 attempts) before replying; the runner still re-runs it as the evidence. Recommended when the Check finishes in under 2 minutes; kept in the state file for `--fix N`. `--timeout-min` (default 100, the Bash job dies at 120). `--isolation worktree`: see **Parallel cards**. Not a git repo: works on a
    size/mtime snapshot; `--commit` refuses. State: `~/.claude/agent-live/orch-runner/<name>.json`.
    **Long runs (> 10 min of computing):** the executor writes the script and runs the pilot only; Claude starts the full
    run in the background with `node D:/2/dev/orch-runner/orchestrate/runner/run-long.mjs --name <name> --out <output dir> [--resume] -- <command> # agent-live/run-<name>.jsonl`

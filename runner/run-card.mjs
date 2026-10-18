@@ -5,13 +5,14 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { q, runBash, quotaOf } from "./lib.mjs";
-import { parseArgs, getSection, extractCheck, lintCard, isJunkPath, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
+import { parseArgs, getSection, extractCheck, extractCommand, lintCard, isJunkPath, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
 import { snapshot, statTree, getReadOnlyDiff } from "./snapshot.mjs";
 import { runCommit, runRecheck } from "./commit.mjs";
 import { runExecutor } from "./executor.mjs";
 import { runReview, runReviewOnly } from "./review.mjs";
 import { formatLedgerLines, appendAcceptanceDraft } from "./acceptance.mjs";
 import { printSummary } from "./summary.mjs";
+import { startIsolation } from "./isolation.mjs";
 
 // 1. Args & Card Parsing
 const rawArgs = process.argv.slice(2);
@@ -140,13 +141,13 @@ if (timeoutMinArg !== undefined) {
 const deadline = Date.now() + timeoutMin * 60000;
 const remainingMin = () => (deadline - Date.now()) / 60000;
 
-const cardAbs = card ? path.resolve(card).replaceAll("\\", "/") : "";
+let cardAbs = card ? path.resolve(card).replaceAll("\\", "/") : "";
 if (cardAbs && !fs.existsSync(cardAbs)) {
   console.error("Card file does not exist:", cardAbs);
   process.exit(2);
 }
 
-const repoAbs = repo ? path.resolve(repo).replaceAll("\\", "/") : "";
+let repoAbs = repo ? path.resolve(repo).replaceAll("\\", "/") : "";
 let isGit = false;
 if (repoAbs) {
   const gitCheck = spawnSync("git", ["-C", repoAbs, "rev-parse", "--is-inside-work-tree"], { encoding: "utf8" });
@@ -171,6 +172,23 @@ if (isFix) {
     }
     process.exit(2);
   }
+}
+
+// --isolation worktree: from here on the repo is the worktree and the card its copy (the main card stays as dispatched).
+let isolation = null, iso = null;
+if (args.isolation !== undefined && !isFix) {
+  if (args.isolation !== "worktree" || recon || !isGit) {
+    console.error("--isolation takes 'worktree', and needs a git repo and no --recon");
+    process.exit(2);
+  }
+  iso = startIsolation({ stateDir, name, mainRepo: repoAbs, mainCard: cardAbs, cardText });
+  if (iso.error) {
+    console.error(`isolation refused: ${iso.error}`);
+    process.exit(2);
+  }
+  isolation = iso.info;
+  repoAbs = iso.repo;
+  cardAbs = iso.card;
 }
 
 const check = extractCheck(cardText);
@@ -224,7 +242,9 @@ for (const p of readOnlyRaw) {
   resolved = resolved.replaceAll("\\", "/");
 
   if (!fs.existsSync(resolved)) continue;
-  if (resolved === normLiveDir || resolved.startsWith(normLiveDir + "/")) continue;
+  // the worktree lives under the live dir, but its own files are the task's
+  const inWt = existingState?.isolation ?? isolation;
+  if ((resolved === normLiveDir || resolved.startsWith(normLiveDir + "/")) && !(inWt && resolved.startsWith(inWt.wt + "/"))) continue;
   if (resolved === cardDirNorm || resolved.startsWith(cardDirNorm + "/")) continue;
 
   readOnlyPaths.push(resolved);
@@ -338,6 +358,7 @@ if (isFix) {
     executor,
     risk,
     execCheck: args["exec-check"] === true,
+    ...(isolation ? { isolation, readOnlyPaths: iso.readOnlyPaths } : {}), // the declared read-only paths stay reserved during Setup
     repo: repoAbs,
     git: isGit,
     check,
@@ -363,6 +384,21 @@ if (isFix) {
     allTouched: []
   };
   save(state);
+}
+
+// ## Setup runs in the worktree before the first snapshot, so what it creates is not "touched".
+const setup = isolation ? extractCommand(cardText, "Setup", true) : null;
+if (setup) {
+  const setupLog = path.posix.join(stateDir, `${name}.setup.log`);
+  const setupRes = await runBash(`{
+${setup}
+} > ${q(setupLog)} 2>&1`, { cwd: repoAbs, timeoutMin: Math.min(30, remainingMin()), exitPath: null });
+  if (setupRes.exit !== 0) {
+    state.outcome = "setup_failed";
+    save(state);
+    console.error(`STOP: ## Setup failed (exit ${setupRes.exit}); no executor was started. Log: ${setupLog}`);
+    process.exit(2);
+  }
 }
 
 // 3. Snapshot
@@ -403,10 +439,10 @@ if (!isFix && !recon && check) {
     greenBefore: baseRes.exit === 0 && !baseRes.timedOut && !expectGreen
   };
   // 126/127 = the Check's command or interpreter is missing: the card is wrong, so no executor run can turn it green.
-  if (baseRes.exit === 126 || baseRes.exit === 127) {
+  if (baseRes.exit === 126 || baseRes.exit === 127 || (isolation && baseRes.timedOut)) {
     state.outcome = "check_broken";
     save(state);
-    console.error(`STOP: the card's Check cannot run (exit ${baseRes.exit}: command or interpreter not found). Fix ## Check; no executor was started. Log: ${baselineLog}`);
+    console.error(`STOP: the card's Check cannot run (exit ${baseRes.exit}: command or interpreter not found, or timed out in a worktree). Fix ## Check; no executor was started. Log: ${baselineLog}`);
     process.exit(2);
   }
   save(state);

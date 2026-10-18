@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { getSection, parseFindings, exemptTaskPath, outOfScopePaths, filterReadOnly } from "./card.mjs";
 import { q, runBash } from "./lib.mjs";
 import { snapshot, getReadOnlyDiff } from "./snapshot.mjs";
+import { mergeBack } from "./isolation.mjs";
 
 export function runCommit(args, ctx) {
   const { stateDir } = ctx;
@@ -141,6 +143,7 @@ export function runCommit(args, ctx) {
   }
   if (fs.existsSync(path.resolve(repoAbs, replyRel))) filesToStage.add(replyRel);
 
+  let pendingLogLine = null;
   const reviewLogRel = "docs/review-log.md";
   const reviewLogAbs = path.resolve(repoAbs, reviewLogRel);
   if (fs.existsSync(reviewLogAbs)) {
@@ -148,8 +151,12 @@ export function runCommit(args, ctx) {
     const goalSec = getSection(cardText, "Goal") || "";
     const goalFirstLine = goalSec.trim().split(/\r?\n/)[0]?.trim() || "";
     const logLine = `- ${yyyymmdd} ${state.name}: ${goalFirstLine} (${cardRel})\n`;
-    fs.appendFileSync(reviewLogAbs, logLine, "utf8");
-    filesToStage.add(reviewLogRel);
+    // A worktree commit would append at the same end of the log as its sibling cards and conflict: done after the merge.
+    if (state.isolation) pendingLogLine = logLine;
+    else {
+      fs.appendFileSync(reviewLogAbs, logLine, "utf8");
+      filesToStage.add(reviewLogRel);
+    }
   }
 
   const fileList = Array.from(filesToStage).sort();
@@ -173,9 +180,35 @@ export function runCommit(args, ctx) {
   state.commit = shortHead;
   const findingsLine = acceptanceSection.match(/^- review findings: .*$/m)?.[0];
   state.findings = findingsLine ? parseFindings(findingsLine) : null;
-  const tmp = `${stateFile}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2), "utf8");
-  fs.renameSync(tmp, stateFile);
+  const save = () => {
+    fs.writeFileSync(`${stateFile}.tmp`, JSON.stringify(state, null, 2), "utf8");
+    fs.renameSync(`${stateFile}.tmp`, stateFile);
+  };
+  save();
+  if (state.isolation) {
+    // The commit is on the worktree's branch: bring it onto the main tree, then re-run the Check there.
+    const merged = mergeBack(state.isolation, [cardRel, reviewRel, replyRel]);
+    if (!merged.ok) {
+      state.isolation.mergeError = merged.error;
+      save();
+      console.error(`cherry-pick onto ${state.isolation.mainRepo} failed (worktree ${state.isolation.wt}, branch ${state.isolation.branch} kept): ${merged.error}
+Resolve it by hand.`);
+      process.exit(1);
+    }
+    state.isolation.merged = merged.commit;
+    state.commit = merged.commit;
+    save();
+    console.log(`merged into ${state.isolation.mainRepo} as ${merged.commit}`);
+    const logAbs = path.resolve(state.isolation.mainRepo, reviewLogRel);
+    if (pendingLogLine && fs.existsSync(logAbs)) {
+      const clean = spawnSync("git", ["-C", state.isolation.mainRepo, "status", "--porcelain", "--", reviewLogRel], { encoding: "utf8" }).stdout.trim() === "";
+      fs.appendFileSync(logAbs, pendingLogLine, "utf8");
+      if (clean) spawnSync("git", ["-C", state.isolation.mainRepo, "commit", "-m", `review-log: ${name}`, "--", reviewLogRel], { encoding: "utf8" });
+      else console.log(`${reviewLogRel} had uncommitted changes: the log line was appended but not committed`);
+    }
+    const re = spawnSync(process.execPath, [fileURLToPath(new URL("./run-card.mjs", import.meta.url)), "--recheck", "--name", name], { stdio: "inherit" });
+    process.exit(re.status ?? 1);
+  }
   process.exit(0);
 }
 
@@ -227,6 +260,18 @@ export async function runRecheck(args, { stateDir }) {
   if (!state.check || typeof state.check !== "string" || state.check.trim() === "") {
     console.error("no check command in state");
     process.exit(2);
+  }
+  if (state.isolation?.merged) {
+    // After the merge the worktree is gone: re-run the Check on the main tree, where the other cards' work now is too.
+    const log = path.posix.join(stateDir, `${name}.merge-check.log`);
+    const res = await runBash(`{
+${state.check}
+} > ${q(log)} 2>&1`, { cwd: state.isolation.mainRepo, timeoutMin: 30, exitPath: null });
+    state.mergeCheck = { exit: res.timedOut ? null : res.exit, log, at: new Date().toISOString() };
+    fs.writeFileSync(`${stateFile}.tmp`, JSON.stringify(state, null, 2), "utf8");
+    fs.renameSync(`${stateFile}.tmp`, stateFile);
+    console.log(`recheck on the main tree: exit=${state.mergeCheck.exit}`);
+    process.exit(state.mergeCheck.exit === 0 ? 0 : 1);
   }
 
   const checkLog = path.posix.join(stateDir, `${name}.check.log`);
